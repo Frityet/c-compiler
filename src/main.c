@@ -40,6 +40,12 @@ int main(int argc, char **argv) {
         free(src);
         return 0;
     }
+    if (argc > 1 && strcmp(argv[1], "--ast") == 0) {
+        char *src = read_stdin();
+        print_ast(src);
+        free(src);
+        return 0;
+    }
     printf("Minimal C compiler placeholder\n");
     return 0;
 }
