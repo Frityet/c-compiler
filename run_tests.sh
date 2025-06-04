@@ -2,7 +2,4 @@
 set -e
 make clean >/dev/null
 make >/dev/null
-cd tests
-./test_version.sh
-./test_lexer.sh
-cd ..
+python3 -m unittest discover -s tests
