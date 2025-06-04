@@ -8,6 +8,10 @@ static char peek(Lexer *lx) {
     return lx->src[lx->pos];
 }
 
+static char peek_next(Lexer *lx) {
+    return lx->src[lx->pos + 1];
+}
+
 static char advance(Lexer *lx) {
     char c = lx->src[lx->pos++];
     if (c == '\n') {
@@ -20,10 +24,37 @@ static char advance(Lexer *lx) {
 }
 
 static void skip_whitespace(Lexer *lx) {
-    char c = peek(lx);
-    while (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-        advance(lx);
-        c = peek(lx);
+    for (;;) {
+        char c = peek(lx);
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            advance(lx);
+            continue;
+        }
+        if (c == '/' && peek_next(lx) == '/') {
+            while (peek(lx) != '\0' && advance(lx) != '\n') {
+                ;
+            }
+            continue;
+        }
+        if (c == '/' && peek_next(lx) == '*') {
+            advance(lx); /* consume */
+            advance(lx);
+            while (peek(lx) && !(peek(lx) == '*' && peek_next(lx) == '/')) {
+                advance(lx);
+            }
+            if (peek(lx)) {
+                advance(lx);
+                advance(lx);
+            }
+            continue;
+        }
+        if (c == '#') {
+            while (peek(lx) != '\0' && advance(lx) != '\n') {
+                ;
+            }
+            continue;
+        }
+        break;
     }
 }
 
@@ -71,7 +102,15 @@ Token lexer_next_token(Lexer *lx) {
         }
         size_t len = (lx->src + lx->pos) - start;
         // check for keywords
-        if (len == 3 && strncmp(start, "int", 3) == 0) {
+        if (len == 2 && strncmp(start, "if", 2) == 0) {
+            return make_token(lx, TOKEN_IF, start, len, line, col);
+        } else if (len == 4 && strncmp(start, "else", 4) == 0) {
+            return make_token(lx, TOKEN_ELSE, start, len, line, col);
+        } else if (len == 5 && strncmp(start, "while", 5) == 0) {
+            return make_token(lx, TOKEN_WHILE, start, len, line, col);
+        } else if (len == 3 && strncmp(start, "for", 3) == 0) {
+            return make_token(lx, TOKEN_FOR, start, len, line, col);
+        } else if (len == 3 && strncmp(start, "int", 3) == 0) {
             return make_token(lx, TOKEN_INT, start, len, line, col);
         } else if (len == 6 && strncmp(start, "return", 6) == 0) {
             return make_token(lx, TOKEN_RETURN, start, len, line, col);
@@ -95,7 +134,20 @@ Token lexer_next_token(Lexer *lx) {
         case '-': return make_token(lx, TOKEN_MINUS, "-", 1, line, col);
         case '*': return make_token(lx, TOKEN_STAR, "*", 1, line, col);
         case '/': return make_token(lx, TOKEN_SLASH, "/", 1, line, col);
+        case '=':
+            if (peek(lx) == '=') { advance(lx); return make_token(lx, TOKEN_EQ, "==", 2, line, col); }
+            return make_token(lx, TOKEN_ASSIGN, "=", 1, line, col);
+        case '!':
+            if (peek(lx) == '=') { advance(lx); return make_token(lx, TOKEN_NEQ, "!=", 2, line, col); }
+            return make_token(lx, TOKEN_UNKNOWN, "!", 1, line, col);
+        case '<':
+            if (peek(lx) == '=') { advance(lx); return make_token(lx, TOKEN_LEQ, "<=", 2, line, col); }
+            return make_token(lx, TOKEN_LT, "<", 1, line, col);
+        case '>':
+            if (peek(lx) == '=') { advance(lx); return make_token(lx, TOKEN_GEQ, ">=", 2, line, col); }
+            return make_token(lx, TOKEN_GT, ">", 1, line, col);
         case ';': return make_token(lx, TOKEN_SEMICOLON, ";", 1, line, col);
+        case ',': return make_token(lx, TOKEN_COMMA, ",", 1, line, col);
         case '(': return make_token(lx, TOKEN_LPAREN, "(", 1, line, col);
         case ')': return make_token(lx, TOKEN_RPAREN, ")", 1, line, col);
         case '{': return make_token(lx, TOKEN_LBRACE, "{", 1, line, col);
@@ -111,15 +163,27 @@ const char *token_type_name(TokenType type) {
         case TOKEN_NUMBER: return "NUMBER";
         case TOKEN_INT: return "INT";
         case TOKEN_RETURN: return "RETURN";
+        case TOKEN_IF: return "IF";
+        case TOKEN_ELSE: return "ELSE";
+        case TOKEN_WHILE: return "WHILE";
+        case TOKEN_FOR: return "FOR";
         case TOKEN_PLUS: return "PLUS";
         case TOKEN_MINUS: return "MINUS";
         case TOKEN_STAR: return "STAR";
         case TOKEN_SLASH: return "SLASH";
+        case TOKEN_ASSIGN: return "ASSIGN";
+        case TOKEN_EQ: return "EQ";
+        case TOKEN_NEQ: return "NEQ";
+        case TOKEN_LT: return "LT";
+        case TOKEN_GT: return "GT";
+        case TOKEN_LEQ: return "LEQ";
+        case TOKEN_GEQ: return "GEQ";
         case TOKEN_SEMICOLON: return "SEMICOLON";
         case TOKEN_LPAREN: return "LPAREN";
         case TOKEN_RPAREN: return "RPAREN";
         case TOKEN_LBRACE: return "LBRACE";
         case TOKEN_RBRACE: return "RBRACE";
+        case TOKEN_COMMA: return "COMMA";
         case TOKEN_UNKNOWN: return "UNKNOWN";
         default: return "?";
     }
