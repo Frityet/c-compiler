@@ -1,15 +1,8 @@
-#include "token.h"
+#include "lexer.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-typedef struct {
-    const char *src;
-    size_t pos;
-    int line;
-    int col;
-} Lexer;
 
 static char peek(Lexer *lx) {
     return lx->src[lx->pos];
