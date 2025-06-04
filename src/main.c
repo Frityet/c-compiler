@@ -1,10 +1,33 @@
 #include "cc.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+
+static char *read_stdin(void) {
+    size_t size = 0;
+    size_t cap = 1024;
+    char *buf = malloc(cap);
+    int c;
+    while ((c = getchar()) != EOF) {
+        if (size + 1 >= cap) {
+            cap *= 2;
+            buf = realloc(buf, cap);
+        }
+        buf[size++] = (char)c;
+    }
+    buf[size] = '\0';
+    return buf;
+}
 
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--version") == 0) {
         printf("cc version 0.1\n");
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--tokens") == 0) {
+        char *src = read_stdin();
+        print_tokens(src);
+        free(src);
         return 0;
     }
     printf("Minimal C compiler placeholder\n");
