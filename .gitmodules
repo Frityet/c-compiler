@@ -1,0 +1,3 @@
+[submodule "types/extern"]
+	path = types/extern
+	url = https://github.com/teal-language/teal-types

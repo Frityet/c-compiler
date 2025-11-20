@@ -1,6 +1,8 @@
-# Build outputs
-bin/
-*.o
-# Temporary
-*~
-__pycache__/
+/luarocks
+/lua
+/lua_modules
+/.luarocks
+/build
+t.tl
+t.lua
+tl-docs/
