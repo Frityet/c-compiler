@@ -2,9 +2,7 @@ local Span = require("util.span")
 local token_mod = require("lexer.token")
 local TokenRecord = token_mod.Token
 local type Token = token_mod.Token
-local type Trivia = token_mod.Trivia
 local type TokenKindType = token_mod.TokenKind
-local type TriviaKindType = token_mod.TriviaKind
 local TK_IDENTIFIER: TokenKindType = "identifier"
 local TK_NUMBER: TokenKindType = "number"
 local TK_STRING: TokenKindType = "string"
@@ -81,7 +79,7 @@ local span_mt: metatable<any> = getmetatable(dummy_span) as metatable<any>
 local dummy_token = TokenRecord.new(TK_EOF, "", dummy_span)
 local token_mt: metatable<any> = getmetatable(dummy_token) as metatable<any>
 
-local empty_trivia_list: {Trivia} = {}
+local empty_trivia_list = {}
 
 local record Lexer
    src: string
@@ -92,17 +90,7 @@ local record Lexer
    line: integer
    col: integer
    reporter: Reporter | nil
-   tokens: {Token}
-end
-
-local function make_span(lex: Lexer, start_pos: integer, end_pos: integer, line: integer, col: integer): Span
-   return setmetatable({
-      file_id = lex.file_id,
-      start_offset = start_pos + 1,
-      end_offset = end_pos + 1,
-      line = line,
-      column = col,
-   } as any, span_mt) as Span
+   eof_token: Token | nil
 end
 
 local function add_diag(lex: Lexer, message: string, span: Span, code: string)
@@ -114,7 +102,7 @@ end
 
 local function new_lexer(src: string, file_id: integer, reporter: Reporter | nil): Lexer
    local len = #src
-   local ptr = ffi.cast("const uint8_t*", src) as Uint8Ptr
+   local ptr: Uint8Ptr = ffi.cast("const uint8_t*", src)
    return {
       src = src,
       src_ptr = ptr,
@@ -124,13 +112,12 @@ local function new_lexer(src: string, file_id: integer, reporter: Reporter | nil
       line = 1,
       col = 1,
       reporter = reporter,
-      tokens = {},
+      eof_token = nil,
    }
 end
 
-local function consume_whitespace(lex: Lexer): {Trivia}
-   local trivia: {Trivia}
-   local trivia_count = 0
+local function consume_whitespace(lex: Lexer): boolean
+   local saw_newline = false
    local ptr = lex.src_ptr
    local len = lex.len
 
@@ -138,29 +125,12 @@ local function consume_whitespace(lex: Lexer): {Trivia}
       local c = ptr[lex.pos]
       
       if band(char_props[c], PROP_SPACE) ~= 0 then
-         if not trivia then trivia = {} end
          if c == 10 then -- \n
-            local start_pos = lex.pos
-            local start_line = lex.line
-            local start_col = lex.col
             lex.pos = lex.pos + 1
             lex.line = lex.line + 1
             lex.col = 1
-            
-            local span = setmetatable({
-               file_id = lex.file_id,
-               start_offset = start_pos + 1,
-               end_offset = lex.pos + 1,
-               line = start_line,
-               column = start_col,
-            } as any, span_mt) as Span
-            
-            trivia_count = trivia_count + 1
-            trivia[trivia_count] = { kind = "newline", lexeme = "\n", span = span }
+            saw_newline = true
          else
-            local start_pos = lex.pos
-            local start_line = lex.line
-            local start_col = lex.col
             while lex.pos < len do
                local cc = ptr[lex.pos]
                if band(char_props[cc], PROP_SPACE) == 0 or cc == 10 then
@@ -169,49 +139,20 @@ local function consume_whitespace(lex: Lexer): {Trivia}
                lex.pos = lex.pos + 1
                lex.col = lex.col + 1
             end
-            
-            local span = setmetatable({
-               file_id = lex.file_id,
-               start_offset = start_pos + 1,
-               end_offset = lex.pos + 1,
-               line = start_line,
-               column = start_col,
-            } as any, span_mt) as Span
-            
-            local text = ffi.string(lex.src_ptr + start_pos, lex.pos - start_pos)
-            trivia_count = trivia_count + 1
-            trivia[trivia_count] = { kind = "whitespace", lexeme = text, span = span }
          end
       elseif c == 47 then -- /
          if lex.pos + 1 < len then
             local next_c = ptr[lex.pos + 1]
             if next_c == 47 then -- //
-               if not trivia then trivia = {} end
-               local start_pos = lex.pos
-               local start_line = lex.line
-               local start_col = lex.col
-               lex.pos = lex.pos + 2
-               lex.col = lex.col + 2
-               while lex.pos < len do
-                  local cc = ptr[lex.pos]
-                  if cc == 10 then break end
+            lex.pos = lex.pos + 2
+            lex.col = lex.col + 2
+            while lex.pos < len do
+               local cc = ptr[lex.pos]
+               if cc == 10 then break end
                   lex.pos = lex.pos + 1
-                  lex.col = lex.col + 1
-               end
-               
-               local span = setmetatable({
-                  file_id = lex.file_id,
-                  start_offset = start_pos + 1,
-                  end_offset = lex.pos + 1,
-                  line = start_line,
-                  column = start_col,
-               } as any, span_mt) as Span
-               
-               local text = ffi.string(lex.src_ptr + start_pos, lex.pos - start_pos)
-               trivia_count = trivia_count + 1
-               trivia[trivia_count] = { kind = "comment", lexeme = text, span = span }
+               lex.col = lex.col + 1
+            end
             elseif next_c == 42 then -- /*
-               if not trivia then trivia = {} end
                local start_pos = lex.pos
                local start_line = lex.line
                local start_col = lex.col
@@ -229,6 +170,7 @@ local function consume_whitespace(lex: Lexer): {Trivia}
                   if cc == 10 then
                      lex.line = lex.line + 1
                      lex.col = 1
+                     saw_newline = true
                   else
                      lex.col = lex.col + 1
                   end
@@ -246,10 +188,6 @@ local function consume_whitespace(lex: Lexer): {Trivia}
                if not terminated then
                   add_diag(lex, "unterminated block comment", span, "LEX001")
                end
-               
-               local text = ffi.string(lex.src_ptr + start_pos, lex.pos - start_pos)
-               trivia_count = trivia_count + 1
-               trivia[trivia_count] = { kind = "comment", lexeme = text, span = span }
             else
                break
             end
@@ -260,10 +198,10 @@ local function consume_whitespace(lex: Lexer): {Trivia}
          break
       end
    end
-   return trivia or empty_trivia_list
+   return saw_newline
 end
 
-local function read_number(lex: Lexer, leading: {Trivia}): Token
+local function read_number(lex: Lexer, leading_newline: boolean): Token
    local start_pos = lex.pos
    local start_line = lex.line
    local start_col = lex.col
@@ -298,12 +236,13 @@ local function read_number(lex: Lexer, leading: {Trivia}): Token
       kind = TK_NUMBER,
       lexeme = lexeme,
       span = span,
-      leading = leading,
+      leading = empty_trivia_list,
       trailing = empty_trivia_list,
+      has_newline = leading_newline,
    } as any, token_mt) as Token
 end
 
-local function read_identifier_or_keyword(lex: Lexer, leading: {Trivia}): Token
+local function read_identifier_or_keyword(lex: Lexer, leading_newline: boolean): Token
    local start_pos = lex.pos
    local start_line = lex.line
    local start_col = lex.col
@@ -337,12 +276,13 @@ local function read_identifier_or_keyword(lex: Lexer, leading: {Trivia}): Token
       kind = kind,
       lexeme = lexeme,
       span = span,
-      leading = leading,
+      leading = empty_trivia_list,
       trailing = empty_trivia_list,
+      has_newline = leading_newline,
    } as any, token_mt) as Token
 end
 
-local function read_string_like(lex: Lexer, leading: {Trivia}, quote: integer, token_kind: TokenKindType, start_pos_override?: integer, start_line_override?: integer, start_col_override?: integer): Token
+local function read_string_like(lex: Lexer, leading_newline: boolean, quote: integer, token_kind: TokenKindType, start_pos_override?: integer, start_line_override?: integer, start_col_override?: integer): Token
    local start_pos = start_pos_override or lex.pos
    local start_line = start_line_override or lex.line
    local start_col = start_col_override or lex.col
@@ -392,12 +332,13 @@ local function read_string_like(lex: Lexer, leading: {Trivia}, quote: integer, t
       kind = token_kind,
       lexeme = lexeme,
       span = span,
-      leading = leading,
+      leading = empty_trivia_list,
       trailing = empty_trivia_list,
+      has_newline = leading_newline,
    } as any, token_mt) as Token
 end
 
-local function match_punctuator(lex: Lexer, leading: {Trivia}): Token
+local function match_punctuator(lex: Lexer, leading_newline: boolean): Token
    local start_pos = lex.pos
    local start_line = lex.line
    local start_col = lex.col
@@ -423,8 +364,9 @@ local function match_punctuator(lex: Lexer, leading: {Trivia}): Token
             kind = TK_PUNCT,
             lexeme = s,
             span = span,
-            leading = leading,
+            leading = empty_trivia_list,
             trailing = empty_trivia_list,
+            has_newline = leading_newline,
          } as any, token_mt) as Token
       end
    end
@@ -445,8 +387,9 @@ local function match_punctuator(lex: Lexer, leading: {Trivia}): Token
             kind = TK_PUNCT,
             lexeme = s,
             span = span,
-            leading = leading,
+            leading = empty_trivia_list,
             trailing = empty_trivia_list,
+            has_newline = leading_newline,
          } as any, token_mt) as Token
       end
    end
@@ -466,8 +409,9 @@ local function match_punctuator(lex: Lexer, leading: {Trivia}): Token
          kind = TK_PUNCT,
          lexeme = s,
          span = span,
-         leading = leading,
+         leading = empty_trivia_list,
          trailing = empty_trivia_list,
+         has_newline = leading_newline,
       } as any, token_mt) as Token
    end
 
@@ -485,95 +429,101 @@ local function match_punctuator(lex: Lexer, leading: {Trivia}): Token
       kind = TK_PUNCT,
       lexeme = s,
       span = span,
-      leading = leading,
+      leading = empty_trivia_list,
       trailing = empty_trivia_list,
+      has_newline = leading_newline,
    } as any, token_mt) as Token
 end
 
-local function lex_all(source: string, file_id: integer, reporter: Reporter | nil): {Token}
-   local lex = new_lexer(source, file_id, reporter)
+local function emit_eof(lex: Lexer, leading_newline: boolean): Token
+   local cached = lex.eof_token
+   if cached then
+      return cached
+   end
+   local eof_span = setmetatable({
+      file_id = lex.file_id,
+      start_offset = lex.pos + 1,
+      end_offset = lex.pos + 1,
+      line = lex.line,
+      column = lex.col,
+   } as any, span_mt) as Span
+   local eof = setmetatable({
+      kind = TK_EOF,
+      lexeme = "",
+      span = eof_span,
+      leading = empty_trivia_list,
+      trailing = empty_trivia_list,
+      has_newline = leading_newline,
+   } as any, token_mt) as Token
+   lex.eof_token = eof
+   return eof
+end
+
+local function next_token(lex: Lexer): Token
    local ptr = lex.src_ptr
    local len = lex.len
-   local tokens = lex.tokens
-   local token_count = 0
 
-   while lex.pos < len do
-      local leading = consume_whitespace(lex)
-      if lex.pos >= len then
-         local eof_span = setmetatable({
-            file_id = lex.file_id,
-            start_offset = lex.pos + 1,
-            end_offset = lex.pos + 1,
-            line = lex.line,
-            column = lex.col,
-         } as any, span_mt) as Span
-         token_count = token_count + 1
-         tokens[token_count] = setmetatable({
-            kind = TK_EOF,
-            lexeme = "",
-            span = eof_span,
-            leading = leading,
-            trailing = empty_trivia_list,
-         } as any, token_mt) as Token
+   local cached = lex.eof_token
+   if cached then
+      return cached
+   end
+
+   local leading_newline = consume_whitespace(lex)
+   if lex.pos >= len then
+      return emit_eof(lex, leading_newline)
+   end
+
+   local c = ptr[lex.pos]
+
+   if c == 76 then -- L
+      local next_c = (lex.pos + 1 < len) and ptr[lex.pos + 1] or 0
+      if next_c == 34 or next_c == 39 then -- " or '
+         local start_pos = lex.pos
+         local start_line = lex.line
+         local start_col = lex.col
+         lex.pos = lex.pos + 1
+         lex.col = lex.col + 1
+         return read_string_like(lex, leading_newline, next_c, next_c == 39 and TK_CHAR or TK_STRING, start_pos, start_line, start_col)
+      else
+         return read_identifier_or_keyword(lex, leading_newline)
+      end
+   elseif band(char_props[c], PROP_ALPHA) ~= 0 then
+      return read_identifier_or_keyword(lex, leading_newline)
+   elseif band(char_props[c], PROP_DIGIT) ~= 0 then
+      return read_number(lex, leading_newline)
+   elseif c == 39 then -- '
+      return read_string_like(lex, leading_newline, 39, TK_CHAR)
+   elseif c == 34 then -- "
+      return read_string_like(lex, leading_newline, 34, TK_STRING)
+   end
+
+   return match_punctuator(lex, leading_newline)
+end
+
+local function lex_generator(source: string, file_id: integer, reporter: Reporter | nil): function(): Token
+   local lex_state = new_lexer(source, file_id, reporter)
+   return function(): Token
+      return next_token(lex_state)
+   end
+end
+
+local function lex_all(source: string, file_id: integer, reporter: Reporter | nil): {Token}
+   local iter = lex_generator(source, file_id, reporter)
+   local tokens: {Token} = {}
+   local n = 0
+   while true do
+      local t = iter()
+      n = n + 1
+      tokens[n] = t
+      if t.kind == TK_EOF then
          break
       end
-
-      local c = ptr[lex.pos]
-      
-      if c == 76 then -- L
-         local next_c = (lex.pos + 1 < len) and ptr[lex.pos + 1] or 0
-         if next_c == 34 or next_c == 39 then -- " or '
-            local start_pos = lex.pos
-            local start_line = lex.line
-            local start_col = lex.col
-            lex.pos = lex.pos + 1
-            lex.col = lex.col + 1
-            token_count = token_count + 1
-            tokens[token_count] = read_string_like(lex, leading, next_c, next_c == 39 and TK_CHAR or TK_STRING, start_pos, start_line, start_col)
-         else
-            token_count = token_count + 1
-            tokens[token_count] = read_identifier_or_keyword(lex, leading)
-         end
-      elseif band(char_props[c], PROP_ALPHA) ~= 0 then
-         token_count = token_count + 1
-         tokens[token_count] = read_identifier_or_keyword(lex, leading)
-      elseif band(char_props[c], PROP_DIGIT) ~= 0 then
-         token_count = token_count + 1
-         tokens[token_count] = read_number(lex, leading)
-      elseif c == 39 then -- '
-         token_count = token_count + 1
-         tokens[token_count] = read_string_like(lex, leading, 39, TK_CHAR)
-      elseif c == 34 then -- "
-         token_count = token_count + 1
-         tokens[token_count] = read_string_like(lex, leading, 34, TK_STRING)
-      else
-         token_count = token_count + 1
-         tokens[token_count] = match_punctuator(lex, leading)
-      end
    end
-   
-   if #tokens == 0 or tokens[#tokens].kind ~= TK_EOF then
-       local eof_span = setmetatable({
-          file_id = lex.file_id,
-          start_offset = lex.pos + 1,
-          end_offset = lex.pos + 1,
-          line = lex.line,
-          column = lex.col,
-       } as any, span_mt) as Span
-       token_count = token_count + 1
-       tokens[token_count] = setmetatable({
-          kind = TK_EOF,
-          lexeme = "",
-          span = eof_span,
-          leading = empty_trivia_list,
-          trailing = empty_trivia_list,
-       } as any, token_mt) as Token
-   end
-
    return tokens
 end
 
 return {
-   lex = lex_all,
+   lex = lex_generator,
+   lex_all = lex_all,
    keywords = keywords,
 }

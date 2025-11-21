@@ -6,7 +6,7 @@ local Reporter = require("diag.reporter")
 describe("lexer", function()
    it("tokenizes a simple function", function()
       local rep = Reporter.new()
-      local tokens = lexer.lex("int main() { return 0; }", 1, rep)
+      local tokens = lexer.lex_all("int main() { return 0; }", 1, rep)
       assert.are.equal(0, #rep.diagnostics)
       local kinds = {}
       for _, t in ipairs(tokens) do
@@ -30,7 +30,7 @@ end)
 describe("lexer wide/string prefixes", function()
    it("lexes wide strings and chars", function()
       local rep = Reporter.new()
-      local tokens = lexer.lex('L"hello" L\'c\'', 2, rep)
+      local tokens = lexer.lex_all('L"hello" L\'c\'', 2, rep)
       assert.are.equal(0, #rep.diagnostics)
       local kinds = {}
       local lexemes = {}

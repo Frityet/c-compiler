@@ -97,15 +97,6 @@ local record State
    file_name_override: {integer: string}
 end
 
-local function has_newline(trivia: {token_mod.Trivia}): boolean
-   for _, t in ipairs(trivia) do
-      if t.kind == "newline" then
-         return true
-      end
-   end
-   return false
-end
-
 local function make_token(kind: TokenKindType, lexeme: string, span: Span): Token
    return TokenRecord.new(kind, lexeme, span, {}, {})
 end
@@ -128,11 +119,9 @@ local function text_from_tokens(tokens: {Token}): string
 end
 
 local function lex_single_token(src: string, file_id: integer, reporter: Reporter): Token | nil
-   local toks = Lexer.lex(src, file_id, reporter)
-   if #toks > 0 then
-      return toks[1]
-   end
-   return nil
+   local next_token = Lexer.lex(src, file_id, reporter)
+   local tok = next_token()
+   return tok
 end
 
 local function path_dir(path: string): string
@@ -265,7 +254,7 @@ local function make_state(reporter: Reporter, config: PreprocessConfig, file_id:
    add_builtin_macros(st, file_id)
 
    for name, body in pairs(config.defines or {}) do
-      local toks = Lexer.lex(body, file_id, reporter)
+      local toks = Lexer.lex_all(body, file_id, reporter)
       define_object_macro(st, name, toks)
    end
    for name, _ in pairs(config.undefs or {}) do
@@ -276,7 +265,7 @@ local function make_state(reporter: Reporter, config: PreprocessConfig, file_id:
 end
 
 local function clone_token(t: Token): Token
-   return TokenRecord.new(t.kind, t.lexeme, t.span, t.leading, t.trailing)
+   return TokenRecord.new(t.kind, t.lexeme, t.span, t.leading, t.trailing, t.has_newline)
 end
 
 local function stringize(argument_tokens: {Token}, span: Span): Token
@@ -416,39 +405,31 @@ end
 
 local function expand_macros(tokens: {Token}, state: State, expanding?: {string:boolean}, skip?: {string:boolean}): {Token}
    local active = expanding or {}
-   local queue: {Token} = {}
-   for _, t in ipairs(tokens) do
-      table.insert(queue, t)
-   end
+   local out: {Token} = {}
    local i = 1
-   while i <= #queue do
-      local t = queue[i]
-      if t.kind == TK_IDENTIFIER then
-         if skip and skip[t.lexeme] then
-            i = i + 1
-            goto continue
-         end
+   local function append_tokens(ts: {Token})
+      for _, et in ipairs(ts) do
+         out[#out + 1] = et
+      end
+   end
+
+   while i <= #tokens do
+      local t = tokens[i]
+      if t.kind == TK_IDENTIFIER and not (skip and skip[t.lexeme]) then
          local macro = state.macros[t.lexeme]
          if macro and not active[t.lexeme] then
             active[t.lexeme] = true
             if macro.is_function then
-               local next_tok = queue[i + 1]
+               local next_tok = tokens[i + 1]
                if next_tok and next_tok.kind == TK_PUNCT and next_tok.lexeme == "(" then
-                  local args, end_idx = parse_macro_args(queue, i + 1)
+                  local args, end_idx = parse_macro_args(tokens, i + 1)
                   local expanded = substitute_macro(macro, t.span, args, state)
-                  for j = end_idx, i, -1 do
-                     table.remove(queue, j)
-                  end
-                  for j = #expanded, 1, -1 do
-                     table.insert(queue, i, expanded[j])
-                  end
+                  local rec = expand_macros(expanded, state, active, skip)
+                  append_tokens(rec)
+                  i = end_idx + 1
                else
-                  for j = i, i do
-                     table.remove(queue, j)
-                  end
-                  for j = #macro.replacement, 1, -1 do
-                     table.insert(queue, i, clone_token(macro.replacement[j]))
-                  end
+                  out[#out + 1] = t
+                  i = i + 1
                end
             else
                local rep = macro.replacement
@@ -465,22 +446,25 @@ local function expand_macros(tokens: {Token}, state: State, expanding?: {string:
                elseif macro.built_in == "__TIME__" then
                   rep = { make_token(TK_STRING, os.date("\"%H:%M:%S\""), t.span) }
                end
-               table.remove(queue, i)
-               for j = #rep, 1, -1 do
-                  table.insert(queue, i, clone_token(rep[j]))
+               local cloned: {Token} = {}
+               for _, rt in ipairs(rep) do
+                  cloned[#cloned + 1] = clone_token(rt)
                end
+               local rec = expand_macros(cloned, state, active, skip)
+               append_tokens(rec)
+               i = i + 1
             end
             active[t.lexeme] = nil
-            -- do not advance; process newly inserted tokens
          else
+            out[#out + 1] = t
             i = i + 1
          end
       else
+         out[#out + 1] = t
          i = i + 1
       end
-      ::continue::
    end
-   return queue
+   return out
 end
 
 local function parse_define(tokens: {Token}, state: State)
@@ -875,9 +859,10 @@ end
 local function collect_line(tokens: {Token}, start_idx: integer): {Token}, integer
    local line: {Token} = {}
    local idx = start_idx
+   local line_no = tokens[start_idx].span.line
    while idx <= #tokens do
       local t = tokens[idx]
-      if #line > 0 and has_newline(t.leading) then
+      if #line > 0 and t.span.line > line_no then
          break
       end
       table.insert(line, t)
@@ -903,14 +888,14 @@ local function preprocess_inner(source: string, file_id: integer, reporter: Repo
    text = splice_lines(text, reporter, file_id)
    reporter:track_file(file_id, current_path, text)
 
-   local raw_tokens = Lexer.lex(text, file_id, reporter)
+   local raw_tokens = Lexer.lex_all(text, file_id, reporter)
    local out_tokens: {Token} = {}
    local cond_stack: {ConditionalState} = {}
 
    local idx = 1
    while idx <= #raw_tokens do
       local t = raw_tokens[idx]
-      local at_line_start = (idx == 1) or has_newline(t.leading)
+      local at_line_start = (idx == 1) or raw_tokens[idx].span.line > raw_tokens[idx - 1].span.line
       local skip_active = (#cond_stack > 0 and cond_stack[#cond_stack].skipping) or false
       if t.kind == TK_EOF then
          table.insert(out_tokens, t)

@@ -27,17 +27,32 @@ local Reporter = require("diag.reporter")
 local rep = Reporter.new()
 
 local baseline = require("lexer.lexer")
-local function bench(name, fn)
-   local t0 = os.clock()
-   local tokens
-   for _ = 1, iter do
-      tokens = fn()
+local function count_tokens(result)
+   if type(result) == "function" then
+      local n = 0
+      while true do
+         local t = result()
+         n = n + 1
+         if t.kind == "eof" then
+            break
+         end
+      end
+      return n
    end
-   local dt = os.clock() - t0
-   print(string.format("%-12s %8.3f ms   tokens=%d", name, dt * 1000.0, #tokens))
+   return #result
 end
 
-bench("baseline (new)", function()
+local function bench(name, fn)
+   local t0 = os.clock()
+    local count = 0
+   for _ = 1, iter do
+      count = count_tokens(fn())
+   end
+   local dt = os.clock() - t0
+   print(string.format("%-14s %8.3f ms   tokens=%d", name, dt * 1000.0, count))
+end
+
+bench("baseline (gen)", function()
    return baseline.lex(src, 1, rep)
 end)
 

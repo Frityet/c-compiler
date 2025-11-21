@@ -16,6 +16,8 @@ local TK_KEYWORD: TokenKindType = "keyword"
 local TK_PUNCT: TokenKindType = "punctuator"
 local TK_EOF: TokenKindType = "eof"
 
+local type TokenIterator = function(): Token
+
 local BN = {
    void: types.BuiltinName = "void",
    bool: types.BuiltinName = "bool",
@@ -54,29 +56,37 @@ local binary_precedence: {string: integer} = {
 }
 
 local record Parser
-   tokens: {Token}
-   pos: integer
+   next_token: TokenIterator
+   current: Token
+   lookahead: Token
    reporter: Reporter
    typedef_scopes: {{string:boolean}}
 end
 
-local function new_parser(tokens: {Token}, reporter: Reporter): Parser
-   return { tokens = tokens, pos = 1, reporter = reporter, typedef_scopes = { {} } }
+local function new_parser(iter: TokenIterator, reporter: Reporter): Parser
+   local first = iter()
+   local second = first.kind == TK_EOF and first or iter()
+   return {
+      next_token = iter,
+      current = first,
+      lookahead = second,
+      reporter = reporter,
+      typedef_scopes = { {} },
+   }
 end
 
 local function cur(p: Parser): Token
-   return p.tokens[p.pos]
+   return p.current
 end
 
 local function peek(p: Parser, offset: integer): Token
-   local idx = p.pos + offset
-   if idx < 1 then
-      idx = 1
+   if offset <= 0 then
+      return p.current
    end
-   if idx > #p.tokens then
-      return p.tokens[#p.tokens]
+   if offset == 1 then
+      return p.lookahead
    end
-   return p.tokens[idx]
+   return p.lookahead
 end
 
 local function at(p: Parser, kind: TokenKindType, lexeme?: string): boolean
@@ -85,9 +95,15 @@ local function at(p: Parser, kind: TokenKindType, lexeme?: string): boolean
 end
 
 local function advance(p: Parser): Token
-   local t = cur(p)
-   if p.pos < #p.tokens then
-      p.pos = p.pos + 1
+   local t = p.current
+   if t.kind ~= TK_EOF then
+      p.current = p.lookahead
+      if p.current.kind == TK_EOF then
+         p.lookahead = p.current
+      else
+         local nxt = p.next_token()
+         p.lookahead = nxt
+      end
    end
    return t
 end
@@ -1389,6 +1405,23 @@ local function parse_external_declaration(p: Parser): {ast.DeclNode}
    return decls
 end
 
+local function tokens_to_iter(tokens: {Token}): TokenIterator
+   local idx = 0
+   local last = tokens[#tokens]
+   if last is nil then
+      error("parser requires at least one token")
+   end
+   local tail = last as Token
+   return function(): Token
+      idx = idx + 1
+      local t = tokens[idx]
+      if t then
+         return t
+      end
+      return tail
+   end
+end
+
 local function parse_translation_unit(p: Parser): ast.TranslationUnit
    local decls: {ast.DeclNode} = {}
    while cur(p).kind ~= TK_EOF do
@@ -1407,8 +1440,13 @@ end
 
 local function parse_source(source: string, file_id: integer, reporter?: Reporter, tokens?: {Token}): ast.TranslationUnit
    local rep = reporter or Reporter.new()
-   local toks = tokens or Lexer.lex(source, file_id, rep)
-   local p = new_parser(toks, rep)
+   local iter: TokenIterator
+   if tokens then
+      iter = tokens_to_iter(tokens)
+   else
+      iter = Lexer.lex(source, file_id, rep)
+   end
+   local p = new_parser(iter, rep)
    return parse_translation_unit(p)
 end
 
