@@ -13,16 +13,16 @@ describe("lexer", function()
          table.insert(kinds, t.kind)
       end
       assert.are.same({
-         "keyword",
-         "identifier",
-         "punctuator",
-         "punctuator",
-         "punctuator",
-         "keyword",
-         "number",
-         "punctuator",
-         "punctuator",
-         "eof",
+         lexer.K_KEYWORD,
+         lexer.K_IDENTIFIER,
+         lexer.K_PUNCT,
+         lexer.K_PUNCT,
+         lexer.K_PUNCT,
+         lexer.K_KEYWORD,
+         lexer.K_NUMBER,
+         lexer.K_PUNCT,
+         lexer.K_PUNCT,
+         lexer.K_EOF,
       }, kinds)
    end)
 end)
@@ -39,7 +39,7 @@ describe("lexer wide/string prefixes", function()
          table.insert(lexemes, t.lexeme)
          if t.kind == "eof" then break end
       end
-      assert.are.same({ "string", "char", "eof" }, { kinds[1], kinds[2], kinds[#kinds] })
+      assert.are.same({ lexer.K_STRING, lexer.K_CHAR, lexer.K_EOF }, { kinds[1], kinds[2], kinds[#kinds] })
       assert.are.equal('L"hello"', lexemes[1])
       assert.are.equal("L'c'", lexemes[2])
    end)

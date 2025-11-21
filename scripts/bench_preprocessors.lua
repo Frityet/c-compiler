@@ -17,7 +17,7 @@ fh:close()
 
 local Reporter = require("diag.reporter")
 local Preprocessor = require("pp.preprocessor")
-local PPFast = require("pp.preprocessor_fast")
+local PPFast = require("pp.preprocessor")
 
 local function bench(name, fn)
    local t0 = os.clock()

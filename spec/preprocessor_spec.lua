@@ -1,12 +1,13 @@
 package.path = "build/?.lua;build/?/init.lua;src/?.lua;src/?/init.lua;" .. package.path
 
+local lexer = require("lexer.lexer")
 local Preprocessor = require("pp.preprocessor")
 local Reporter = require("diag.reporter")
 
 local function lexemes(tokens)
    local out = {}
    for _, t in ipairs(tokens) do
-      if t.kind == "eof" then break end
+      if t.kind == lexer.K_EOF then break end
       table.insert(out, t.lexeme)
    end
    return out

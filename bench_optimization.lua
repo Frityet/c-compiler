@@ -1,7 +1,7 @@
 package.path = "build/?.lua;build/?/init.lua;" .. package.path
 local LexerFFI = require("lexer.lexer_ffi")
 local LexerFast = require("lexer.lexer_fast")
-local Preprocessor = require("pp.preprocessor_fast")
+local Preprocessor = require("pp.preprocessor")
 
 local function read_file(path)
    local f = io.open(path, "rb")

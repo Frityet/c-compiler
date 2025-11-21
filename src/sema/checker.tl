@@ -2,7 +2,7 @@ local ast = require("parser.ast")
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local Span = require("util.span")
-local token_mod = require("lexer.token")
+local LexerFast = require("lexer.lexer")
 local scopes = require("sema.scopes")
 local symbols = require("sema.symbols")
 local types = require("sema.types")
@@ -490,7 +490,7 @@ local check_expr: function(ctx: Context, expr: ast.ExprNode): ExprInfo
 local check_stmt: function(ctx: Context, stmt: ast.StmtNode)
 local process_decl: function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean)
 
-local function number_literal_type(tok: token_mod.Token): types.BuiltinType
+local function number_literal_type(tok: LexerFast.Token): types.BuiltinType
    local lex = tok.lexeme
    if lex:find("%.") or lex:find("[eE]") then
       return make_builtin("double", tok.span, true)

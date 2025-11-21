@@ -1,529 +1,458 @@
-local Span = require("util.span")
-local token_mod = require("lexer.token")
-local TokenRecord = token_mod.Token
-local type Token = token_mod.Token
-local type TokenKindType = token_mod.TokenKind
-local TK_IDENTIFIER: TokenKindType = "identifier"
-local TK_NUMBER: TokenKindType = "number"
-local TK_STRING: TokenKindType = "string"
-local TK_CHAR: TokenKindType = "char"
-local TK_KEYWORD: TokenKindType = "keyword"
-local TK_PUNCT: TokenKindType = "punctuator"
-local TK_EOF: TokenKindType = "eof"
-local Diagnostic = require("diag.diagnostics")
-local Reporter = require("diag.reporter")
 local ffi = require("ffi")
 local bit = require("bit")
+local Span = require("util.span")
 local band = bit.band
 local bor = bit.bor
 
-local keywords: {string:boolean} = {
-   ["auto"] = true, ["break"] = true, ["case"] = true, ["char"] = true, ["const"] = true,
-   ["continue"] = true, ["default"] = true, ["do"] = true, ["double"] = true, ["else"] = true,
-   ["enum"] = true, ["extern"] = true, ["float"] = true, ["for"] = true, ["goto"] = true,
-   ["if"] = true, ["inline"] = true, ["int"] = true, ["long"] = true, ["register"] = true,
-   ["restrict"] = true, ["return"] = true, ["short"] = true, ["signed"] = true, ["sizeof"] = true,
-   ["static"] = true, ["struct"] = true, ["switch"] = true, ["typedef"] = true, ["union"] = true,
-   ["unsigned"] = true, ["void"] = true, ["volatile"] = true, ["while"] = true, ["_Bool"] = true,
-   ["_Complex"] = true, ["_Imaginary"] = true,
-}
+local type TokenKind = integer
+local type TokenFlags = integer
 
-local punctuators: {string:boolean} = {
-   ["{"] = true, ["}"] = true, ["("] = true, [")"] = true, ["["] = true, ["]"] = true,
-   [";"] = true, [","] = true, ["."] = true, ["->"] = true, ["++"] = true, ["--"] = true,
-   ["&"] = true, ["*"] = true, ["+"] = true, ["-"] = true, ["~"] = true, ["!"] = true,
-   ["/"] = true, ["%"] = true, ["<<"] = true, [">>"] = true, ["<"] = true, [">"] = true,
-   ["<="] = true, [">="] = true, ["=="] = true, ["!="] = true, ["^"] = true, ["|"] = true,
-   ["&&"] = true, ["||"] = true, ["?"] = true, [":"] = true, ["#"] = true, ["##"] = true, ["="] = true, ["+="] = true,
-   ["-="] = true, ["*="] = true, ["/="] = true, ["%="] = true, ["&="] = true, ["|="] = true,
-   ["^="] = true, ["<<="] = true, [">>="] = true, ["..."] = true,
-}
+-- Token Kinds
+local K_UNKNOWN = 0
+local K_IDENTIFIER = 1
+local K_NUMBER = 2
+local K_STRING = 3
+local K_CHAR = 4
+local K_KEYWORD = 5
+local K_PUNCT = 6
+local K_EOF = 7
+local K_COMMENT = 8
+local K_WHITESPACE = 9
 
--- FFI Types
+-- Token Flags
+local TOKEN_FLAG_NEWLINE = 1
+local TOKEN_FLAG_LEADING_SPACE = 2
+
+-- FFI Definitions
+ffi.cdef[[
+typedef struct {
+  uint32_t start;      /* 0-based */
+  uint32_t stop;       /* exclusive */
+  uint32_t line;       /* 1-based */
+  uint32_t col;        /* 1-based */
+  uint8_t kind;        /* TokenKindId */
+  uint8_t flags;       /* TokenFlags */
+} tl_token_fast;
+]]
+
+local record TokenC is ffi.CData
+   where ffi.istype("tl_token_fast", self)
+   start: integer
+   stop: integer
+   line: integer
+   col: integer
+   kind: integer
+   flags: integer
+end
+
+local record Token
+   kind: TokenKind
+   lexeme: string
+   span: Span
+   has_newline: boolean
+end
+
+local record Uint8Array is {integer}, ffi.CData
+end
+
 local type Uint8Ptr = ffi.Pointer<integer>
-local type Uint8Array = ffi.Array<integer>
 
--- Character properties
+local TokenType = ffi.typeof("tl_token_fast")
+
+local record LexerState
+   src: string
+   src_ptr: Uint8Ptr
+   len: integer
+   pos: integer
+   line: integer
+   col: integer
+   file_id: integer
+   newline_flag: integer
+   current_token: TokenC
+end
+
+-- Character Properties Lookup Table (FFI)
 local PROP_SPACE = 1
 local PROP_DIGIT = 2
 local PROP_ALPHA = 4
-local PROP_IDENT = 8
+local PROP_IDENT = 8 -- ALPHA | DIGIT | _
 local PROP_HEX = 16
 
-local char_props = ffi.new("uint8_t[256]") as Uint8Array
-local punct_max_len = ffi.new("uint8_t[256]") as Uint8Array
-
-for i = 0, 255 do
-   local c = string.char(i)
-   local p = 0
-   if c:match("%s") then p = bor(p, PROP_SPACE) end
-   if c:match("%d") then p = bor(p, PROP_DIGIT) end
-   if c:match("[%a_]") then p = bor(p, PROP_ALPHA) end
-   if c:match("[%w_]") then p = bor(p, PROP_IDENT) end
-   if c:match("[%da-fA-F]") then p = bor(p, PROP_HEX) end
-   char_props[i] = p
+local char_props_c: Uint8Array = ffi.new("uint8_t[256]")
+local function init_char_props()
+   for i = 0, 255 do
+      local p = 0
+      if (i >= 9 and i <= 13) or i == 32 then p = bor(p, PROP_SPACE) end
+      if i >= 48 and i <= 57 then p = bor(p, bor(PROP_DIGIT, bor(PROP_IDENT, PROP_HEX))) end
+      if (i >= 65 and i <= 90) or (i >= 97 and i <= 122) then p = bor(p, bor(PROP_ALPHA, PROP_IDENT)) end
+      if (i >= 65 and i <= 70) or (i >= 97 and i <= 102) then p = bor(p, PROP_HEX) end
+      if i == 95 then p = bor(p, bor(PROP_IDENT, PROP_ALPHA)) end -- _ is alpha-like for start
+      char_props_c[i] = p
+   end
 end
+init_char_props()
 
-for k, _ in pairs(punctuators) do
-   local b = string.byte(k, 1)
-   local l = #k
-   if l > punct_max_len[b] then
-      punct_max_len[b] = l
+local punct_max_len_c: Uint8Array = ffi.new("uint8_t[256]")
+local punctuators: {string:boolean} = {}
+local function add_punct(s: string)
+   punctuators[s] = true
+   local first = string.byte(s, 1)
+   if #s > punct_max_len_c[first] then
+      punct_max_len_c[first] = #s
    end
 end
 
--- Metatable caching
-local dummy_span = Span.new(0, 0, 0, 0, 0)
-local span_mt: metatable<any> = getmetatable(dummy_span) as metatable<any>
+local punct_list = {
+   "+", "-", "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", "?",
+   "++", "--",
+   "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "<<=", ">>=",
+   "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "->", ".", ",", ";", ":",
+   "(", ")", "[", "]", "{", "}", "...", "##", "#"
+}
+for _, p in ipairs(punct_list) do add_punct(p) end
 
-local dummy_token = TokenRecord.new(TK_EOF, "", dummy_span)
-local token_mt: metatable<any> = getmetatable(dummy_token) as metatable<any>
+local keywords: {string:boolean} = {
+   ["auto"] = true, ["break"] = true, ["case"] = true, ["char"] = true,
+   ["const"] = true, ["continue"] = true, ["default"] = true, ["do"] = true,
+   ["double"] = true, ["else"] = true, ["enum"] = true, ["extern"] = true,
+   ["float"] = true, ["for"] = true, ["goto"] = true, ["if"] = true,
+   ["int"] = true, ["long"] = true, ["register"] = true, ["return"] = true,
+   ["short"] = true, ["signed"] = true, ["sizeof"] = true, ["static"] = true,
+   ["struct"] = true, ["switch"] = true, ["typedef"] = true, ["union"] = true,
+   ["unsigned"] = true, ["void"] = true, ["volatile"] = true, ["while"] = true,
+   ["_Bool"] = true, ["_Complex"] = true, ["_Imaginary"] = true, ["inline"] = true,
+   ["restrict"] = true, ["_Alignas"] = true, ["_Alignof"] = true, ["_Atomic"] = true,
+   ["_Generic"] = true, ["_Noreturn"] = true, ["_Static_assert"] = true, ["_Thread_local"] = true,
+}
 
-local empty_trivia_list = {}
+local function new_lexer(source: string, file_id: integer): LexerState
+   local len = #source
 
-local record Lexer
-   src: string
-   src_ptr: Uint8Ptr -- const uint8_t*
-   len: integer
-   file_id: integer
-   pos: integer -- 0-based
-   line: integer
-   col: integer
-   reporter: Reporter | nil
-   eof_token: Token | nil
-end
-
-local function add_diag(lex: Lexer, message: string, span: Span, code: string)
-   local rep = lex.reporter
-   if not rep is nil then
-      rep:report(Diagnostic.new("error", message, span, code))
-   end
-end
-
-local function new_lexer(src: string, file_id: integer, reporter: Reporter | nil): Lexer
-   local len = #src
-   local ptr: Uint8Ptr = ffi.cast("const uint8_t*", src)
    return {
-      src = src,
-      src_ptr = ptr,
+      src = source,
+      src_ptr = ffi.cast("const uint8_t*", source),
       len = len,
-      file_id = file_id,
       pos = 0,
       line = 1,
       col = 1,
-      reporter = reporter,
-      eof_token = nil,
+      file_id = file_id,
+      newline_flag = 0,
+      current_token = ffi.new(TokenType)
    }
 end
 
-local function consume_whitespace(lex: Lexer): boolean
-   local saw_newline = false
-   local ptr = lex.src_ptr
-   local len = lex.len
-
-   while lex.pos < len do
-      local c = ptr[lex.pos]
+local function next_token(state: LexerState): TokenC
+   local ptr = state.src_ptr
+   local len = state.len
+   local pos = state.pos
+   local line = state.line
+   local col = state.col
+   local newline_flag = state.newline_flag
+   
+   local cp = char_props_c
+   local pml = punct_max_len_c
+   
+   local start_pos = pos
+   local start_col = col
+   local kind: TokenKind = K_EOF
+   ::scan::
+   if pos >= len then
+      kind = K_EOF
+   else
+      local c = ptr[pos]
       
-      if band(char_props[c], PROP_SPACE) ~= 0 then
-         if c == 10 then -- \n
-            lex.pos = lex.pos + 1
-            lex.line = lex.line + 1
-            lex.col = 1
-            saw_newline = true
-         else
-            while lex.pos < len do
-               local cc = ptr[lex.pos]
-               if band(char_props[cc], PROP_SPACE) == 0 or cc == 10 then
-                  break
-               end
-               lex.pos = lex.pos + 1
-               lex.col = lex.col + 1
+      -- Fast Skip Whitespace
+      if band(cp[c], PROP_SPACE) ~= 0 then
+         newline_flag = 0
+         repeat
+            if c == 10 then -- \n
+               line = line + 1
+               col = 1
+               newline_flag = TOKEN_FLAG_NEWLINE
+            else
+               col = col + 1
+            end
+            pos = pos + 1
+            if pos >= len then break end
+            c = ptr[pos]
+         until band(cp[c], PROP_SPACE) == 0
+         start_pos = pos
+         start_col = col
+         goto scan
+      end
+
+      -- String / Char (handles wide prefixes)
+      if c == 34 or c == 39 or (c == 76 and pos + 1 < len and (ptr[pos+1] == 34 or ptr[pos+1] == 39)) then
+         local quote = c
+         kind = K_STRING
+         if c == 76 then -- L"..."
+            pos = pos + 1; col = col + 1
+            quote = ptr[pos]
+         end
+         if quote == 39 then kind = K_CHAR end
+         
+         pos = pos + 1; col = col + 1 -- skip quote
+         
+         while pos < len do
+            c = ptr[pos]
+            if c == quote then
+               pos = pos + 1; col = col + 1
+               break
+            elseif c == 92 then -- \
+               pos = pos + 2; col = col + 2 -- skip escaped char
+            elseif c == 10 then -- newline in string?
+               line = line + 1; col = 1; pos = pos + 1
+            else
+               pos = pos + 1; col = col + 1
             end
          end
-      elseif c == 47 then -- /
-         if lex.pos + 1 < len then
-            local next_c = ptr[lex.pos + 1]
-            if next_c == 47 then -- //
-            lex.pos = lex.pos + 2
-            lex.col = lex.col + 2
-            while lex.pos < len do
-               local cc = ptr[lex.pos]
-               if cc == 10 then break end
-                  lex.pos = lex.pos + 1
-               lex.col = lex.col + 1
+
+      -- Identifier / Keyword
+      elseif band(cp[c], PROP_ALPHA) ~= 0 or c == 95 then -- _
+         repeat
+            pos = pos + 1
+            col = col + 1
+            if pos >= len then break end
+            c = ptr[pos]
+         until band(cp[c], PROP_IDENT) == 0
+         
+         local s = ffi.string(ptr + start_pos, pos - start_pos)
+         kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
+      
+      -- Number
+      elseif band(cp[c], PROP_DIGIT) ~= 0 then
+         repeat
+            pos = pos + 1
+            col = col + 1
+            if pos >= len then break end
+            c = ptr[pos]
+         until band(cp[c], PROP_IDENT) == 0 and c ~= 46 and c ~= 43 and c ~= 45
+         
+         pos = start_pos
+         col = start_col
+         c = ptr[pos]
+         
+         if c == 48 and pos + 1 < len and (ptr[pos+1] == 120 or ptr[pos+1] == 88) then -- 0x
+            pos = pos + 2
+            col = col + 2
+            while pos < len do
+               c = ptr[pos]
+               if band(cp[c], PROP_HEX) ~= 0 or band(cp[c], PROP_DIGIT) ~= 0 then
+                  pos = pos + 1; col = col + 1
+               else
+                  break
+               end
             end
-            elseif next_c == 42 then -- /*
-               local start_pos = lex.pos
-               local start_line = lex.line
-               local start_col = lex.col
-               lex.pos = lex.pos + 2
-               lex.col = lex.col + 2
-               local terminated = false
-               while lex.pos < len do
-                  local cc = ptr[lex.pos]
-                  if cc == 42 and lex.pos + 1 < len and ptr[lex.pos + 1] == 47 then -- */
-                     lex.pos = lex.pos + 2
-                     lex.col = lex.col + 2
-                     terminated = true
+         else
+            while pos < len do
+               c = ptr[pos]
+               if band(cp[c], PROP_DIGIT) ~= 0 then
+                  pos = pos + 1; col = col + 1
+               else
+                  break
+               end
+            end
+         end
+         if pos < len and ptr[pos] == 46 then
+            pos = pos + 1; col = col + 1
+            while pos < len do
+               c = ptr[pos]
+               if band(cp[c], PROP_DIGIT) ~= 0 then
+                  pos = pos + 1; col = col + 1
+               else
+                  break
+               end
+            end
+         end
+         if pos < len then
+            c = ptr[pos]
+            if c == 101 or c == 69 or c == 112 or c == 80 then -- e E p P
+               pos = pos + 1; col = col + 1
+               if pos < len and (ptr[pos] == 43 or ptr[pos] == 45) then -- + -
+                  pos = pos + 1; col = col + 1
+               end
+               while pos < len do
+                  c = ptr[pos]
+                  if band(cp[c], PROP_DIGIT) ~= 0 then
+                     pos = pos + 1; col = col + 1
+                  else
                      break
                   end
-                  if cc == 10 then
-                     lex.line = lex.line + 1
-                     lex.col = 1
-                     saw_newline = true
-                  else
-                     lex.col = lex.col + 1
-                  end
-                  lex.pos = lex.pos + 1
                end
-               
-               local span = setmetatable({
-                  file_id = lex.file_id,
-                  start_offset = start_pos + 1,
-                  end_offset = lex.pos + 1,
-                  line = start_line,
-                  column = start_col,
-               } as any, span_mt) as Span
-               
-               if not terminated then
-                  add_diag(lex, "unterminated block comment", span, "LEX001")
-               end
+            end
+         end
+         while pos < len do
+            c = ptr[pos]
+            if c == 117 or c == 85 or c == 108 or c == 76 or c == 102 or c == 70 then -- u U l L f F
+               pos = pos + 1; col = col + 1
             else
                break
             end
-         else
-            break
          end
-      else
-         break
-      end
-   end
-   return saw_newline
-end
+         
+         kind = K_NUMBER
 
-local function read_number(lex: Lexer, leading_newline: boolean): Token
-   local start_pos = lex.pos
-   local start_line = lex.line
-   local start_col = lex.col
-   local ptr = lex.src_ptr
-   local len = lex.len
-
-   while lex.pos < len do
-      local c = ptr[lex.pos]
-      if band(char_props[c], PROP_DIGIT) ~= 0 or c == 46 or 
-         c == 120 or c == 88 or -- x X
-         c == 112 or c == 80 or -- p P
-         c == 101 or c == 69 or -- e E
-         c == 117 or c == 85 or -- u U
-         c == 108 or c == 76    -- l L
-      then
-         lex.pos = lex.pos + 1
-         lex.col = lex.col + 1
-      else
-         break
-      end
-   end
-   local span = setmetatable({
-      file_id = lex.file_id,
-      start_offset = start_pos + 1,
-      end_offset = lex.pos + 1,
-      line = start_line,
-      column = start_col,
-   } as any, span_mt) as Span
-   
-   local lexeme = ffi.string(ptr + start_pos, lex.pos - start_pos)
-   return setmetatable({
-      kind = TK_NUMBER,
-      lexeme = lexeme,
-      span = span,
-      leading = empty_trivia_list,
-      trailing = empty_trivia_list,
-      has_newline = leading_newline,
-   } as any, token_mt) as Token
-end
-
-local function read_identifier_or_keyword(lex: Lexer, leading_newline: boolean): Token
-   local start_pos = lex.pos
-   local start_line = lex.line
-   local start_col = lex.col
-   local ptr = lex.src_ptr
-   local len = lex.len
-
-   lex.pos = lex.pos + 1
-   lex.col = lex.col + 1
-
-   while lex.pos < len do
-      local c = ptr[lex.pos]
-      if band(char_props[c], PROP_IDENT) ~= 0 then
-         lex.pos = lex.pos + 1
-         lex.col = lex.col + 1
-      else
-         break
-      end
-   end
-
-   local lexeme = ffi.string(ptr + start_pos, lex.pos - start_pos)
-   local kind: TokenKindType = keywords[lexeme] and TK_KEYWORD or TK_IDENTIFIER
-   local span = setmetatable({
-      file_id = lex.file_id,
-      start_offset = start_pos + 1,
-      end_offset = lex.pos + 1,
-      line = start_line,
-      column = start_col,
-   } as any, span_mt) as Span
-   
-   return setmetatable({
-      kind = kind,
-      lexeme = lexeme,
-      span = span,
-      leading = empty_trivia_list,
-      trailing = empty_trivia_list,
-      has_newline = leading_newline,
-   } as any, token_mt) as Token
-end
-
-local function read_string_like(lex: Lexer, leading_newline: boolean, quote: integer, token_kind: TokenKindType, start_pos_override?: integer, start_line_override?: integer, start_col_override?: integer): Token
-   local start_pos = start_pos_override or lex.pos
-   local start_line = start_line_override or lex.line
-   local start_col = start_col_override or lex.col
-   local ptr = lex.src_ptr
-   local len = lex.len
-
-   lex.pos = lex.pos + 1 -- consume opening quote
-   lex.col = lex.col + 1
-
-   while lex.pos < len do
-      local c = ptr[lex.pos]
-      if c == 92 then -- \
-         if lex.pos + 1 < len then
-            lex.pos = lex.pos + 2
-            lex.col = lex.col + 2
+      -- Comments / Punctuation
+      elseif c == 47 then -- /
+         local next_c = (pos + 1 < len) and ptr[pos+1] or 0
+         if next_c == 47 then -- //
+            pos = pos + 2; col = col + 2
+            while pos < len do
+               c = ptr[pos]
+               if c == 10 then break end
+               pos = pos + 1
+            end
+            newline_flag = 0 
+            goto scan
+         elseif next_c == 42 then -- /*
+            pos = pos + 2; col = col + 2
+            while pos < len do
+               c = ptr[pos]
+               if c == 42 and pos + 1 < len and ptr[pos+1] == 47 then
+                  pos = pos + 2; col = col + 2
+                  break
+               end
+               if c == 10 then
+                  line = line + 1; col = 1
+               else
+                  col = col + 1
+               end
+               pos = pos + 1
+            end
+            newline_flag = 0 
+            goto scan
          else
-            lex.pos = lex.pos + 1
-            lex.col = lex.col + 1
-            break
+            local max_l = pml[c]
+            local matched = false
+            if max_l > 1 then
+                if max_l >= 2 and pos + 1 < len then
+                   local c2 = ptr[pos+1]
+                   if c2 == 61 then
+                      matched = true; pos = pos + 2; col = col + 2
+                   end
+                end
+            end
+            
+            if not matched then
+               pos = pos + 1
+               col = col + 1
+            end
+            
+            kind = K_PUNCT
          end
-      elseif c == quote then
-         lex.pos = lex.pos + 1
-         lex.col = lex.col + 1
-         break
-      elseif c == 10 then -- \n
-         lex.line = lex.line + 1
-         lex.col = 1
-         lex.pos = lex.pos + 1
+         
       else
-         lex.pos = lex.pos + 1
-         lex.col = lex.col + 1
+         local max_l = pml[c]
+         local matched = false
+         if max_l > 1 then
+             if max_l >= 3 and pos + 2 < len then
+                local c2 = ptr[pos+1]
+                local c3 = ptr[pos+2]
+                if c == 60 and c2 == 60 and c3 == 61 then matched = true; pos = pos + 3; col = col + 3 end
+                if c == 62 and c2 == 62 and c3 == 61 then matched = true; pos = pos + 3; col = col + 3 end
+                if c == 46 and c2 == 46 and c3 == 46 then matched = true; pos = pos + 3; col = col + 3 end
+             end
+             if not matched and max_l >= 2 and pos + 1 < len then
+                local c2 = ptr[pos+1]
+                if c2 == 61 then
+                   if c == 43 or c == 45 or c == 42 or c == 47 or c == 37 or c == 94 or c == 38 or c == 124 or c == 61 or c == 33 or c == 60 or c == 62 then
+                      matched = true; pos = pos + 2; col = col + 2
+                   end
+                elseif c == 45 and c2 == 62 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 43 and c2 == 43 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 45 and c2 == 45 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 38 and c2 == 38 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 124 and c2 == 124 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 60 and c2 == 60 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 62 and c2 == 62 then matched = true; pos = pos + 2; col = col + 2
+                elseif c == 35 and c2 == 35 then matched = true; pos = pos + 2; col = col + 2
+                end
+             end
+         end
+         
+         if not matched then
+            pos = pos + 1
+            col = col + 1
+         end
+         
+         kind = K_PUNCT
       end
    end
    
-   if lex.pos > len then lex.pos = len end
-
-   local span = setmetatable({
-      file_id = lex.file_id,
-      start_offset = start_pos + 1,
-      end_offset = lex.pos + 1,
-      line = start_line,
-      column = start_col,
-   } as any, span_mt) as Span
+   state.pos = pos
+   state.line = line
+   state.col = col
+   state.newline_flag = 0
    
-   local lexeme = ffi.string(ptr + start_pos, lex.pos - start_pos)
-   return setmetatable({
-      kind = token_kind,
-      lexeme = lexeme,
+   local tok = state.current_token
+   if kind == K_EOF then
+      tok.kind = K_EOF
+      tok.start = pos
+      tok.stop = pos
+      tok.line = line
+      tok.col = col
+      tok.flags = 0
+      return tok
+   end
+
+   tok.kind = kind
+   tok.start = start_pos
+   tok.stop = pos
+   tok.line = line
+   tok.col = start_col
+   tok.flags = newline_flag
+   return tok
+end
+
+local function lexeme(state: LexerState, tok: TokenC): string
+   return ffi.string(state.src_ptr + tok.start, tok.stop - tok.start)
+end
+
+local function token_from_c(state: LexerState, tc: TokenC): Token
+   local lx = lexeme(state, tc)
+   local span = Span.new(state.file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
+   return {
+      kind = tc.kind,
+      lexeme = lx,
       span = span,
-      leading = empty_trivia_list,
-      trailing = empty_trivia_list,
-      has_newline = leading_newline,
-   } as any, token_mt) as Token
+      has_newline = band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0,
+   }
 end
 
-local function match_punctuator(lex: Lexer, leading_newline: boolean): Token
-   local start_pos = lex.pos
-   local start_line = lex.line
-   local start_col = lex.col
-   local ptr = lex.src_ptr
-   local len = lex.len
-   
-   local c = ptr[lex.pos]
-   local max_len = punct_max_len[c]
-
-   if max_len >= 3 and lex.pos + 2 < len then
-      local s = ffi.string(ptr + lex.pos, 3)
-      if punctuators[s] then
-         lex.pos = lex.pos + 3
-         lex.col = lex.col + 3
-         local span = setmetatable({
-            file_id = lex.file_id,
-            start_offset = start_pos + 1,
-            end_offset = lex.pos + 1,
-            line = start_line,
-            column = start_col,
-         } as any, span_mt) as Span
-         return setmetatable({
-            kind = TK_PUNCT,
-            lexeme = s,
-            span = span,
-            leading = empty_trivia_list,
-            trailing = empty_trivia_list,
-            has_newline = leading_newline,
-         } as any, token_mt) as Token
-      end
-   end
-
-   if max_len >= 2 and lex.pos + 1 < len then
-      local s = ffi.string(ptr + lex.pos, 2)
-      if punctuators[s] then
-         lex.pos = lex.pos + 2
-         lex.col = lex.col + 2
-         local span = setmetatable({
-            file_id = lex.file_id,
-            start_offset = start_pos + 1,
-            end_offset = lex.pos + 1,
-            line = start_line,
-            column = start_col,
-         } as any, span_mt) as Span
-         return setmetatable({
-            kind = TK_PUNCT,
-            lexeme = s,
-            span = span,
-            leading = empty_trivia_list,
-            trailing = empty_trivia_list,
-            has_newline = leading_newline,
-         } as any, token_mt) as Token
-      end
-   end
-
-   local s = string.char(c)
-   if punctuators[s] then
-      lex.pos = lex.pos + 1
-      lex.col = lex.col + 1
-      local span = setmetatable({
-         file_id = lex.file_id,
-         start_offset = start_pos + 1,
-         end_offset = lex.pos + 1,
-         line = start_line,
-         column = start_col,
-      } as any, span_mt) as Span
-      return setmetatable({
-         kind = TK_PUNCT,
-         lexeme = s,
-         span = span,
-         leading = empty_trivia_list,
-         trailing = empty_trivia_list,
-         has_newline = leading_newline,
-      } as any, token_mt) as Token
-   end
-
-   lex.pos = lex.pos + 1
-   lex.col = lex.col + 1
-   local span = setmetatable({
-      file_id = lex.file_id,
-      start_offset = start_pos + 1,
-      end_offset = lex.pos + 1,
-      line = start_line,
-      column = start_col,
-   } as any, span_mt) as Span
-   add_diag(lex, "unknown character: " .. s, span, "LEX003")
-   return setmetatable({
-      kind = TK_PUNCT,
-      lexeme = s,
-      span = span,
-      leading = empty_trivia_list,
-      trailing = empty_trivia_list,
-      has_newline = leading_newline,
-   } as any, token_mt) as Token
-end
-
-local function emit_eof(lex: Lexer, leading_newline: boolean): Token
-   local cached = lex.eof_token
-   if cached then
-      return cached
-   end
-   local eof_span = setmetatable({
-      file_id = lex.file_id,
-      start_offset = lex.pos + 1,
-      end_offset = lex.pos + 1,
-      line = lex.line,
-      column = lex.col,
-   } as any, span_mt) as Span
-   local eof = setmetatable({
-      kind = TK_EOF,
-      lexeme = "",
-      span = eof_span,
-      leading = empty_trivia_list,
-      trailing = empty_trivia_list,
-      has_newline = leading_newline,
-   } as any, token_mt) as Token
-   lex.eof_token = eof
-   return eof
-end
-
-local function next_token(lex: Lexer): Token
-   local ptr = lex.src_ptr
-   local len = lex.len
-
-   local cached = lex.eof_token
-   if cached then
-      return cached
-   end
-
-   local leading_newline = consume_whitespace(lex)
-   if lex.pos >= len then
-      return emit_eof(lex, leading_newline)
-   end
-
-   local c = ptr[lex.pos]
-
-   if c == 76 then -- L
-      local next_c = (lex.pos + 1 < len) and ptr[lex.pos + 1] or 0
-      if next_c == 34 or next_c == 39 then -- " or '
-         local start_pos = lex.pos
-         local start_line = lex.line
-         local start_col = lex.col
-         lex.pos = lex.pos + 1
-         lex.col = lex.col + 1
-         return read_string_like(lex, leading_newline, next_c, next_c == 39 and TK_CHAR or TK_STRING, start_pos, start_line, start_col)
-      else
-         return read_identifier_or_keyword(lex, leading_newline)
-      end
-   elseif band(char_props[c], PROP_ALPHA) ~= 0 then
-      return read_identifier_or_keyword(lex, leading_newline)
-   elseif band(char_props[c], PROP_DIGIT) ~= 0 then
-      return read_number(lex, leading_newline)
-   elseif c == 39 then -- '
-      return read_string_like(lex, leading_newline, 39, TK_CHAR)
-   elseif c == 34 then -- "
-      return read_string_like(lex, leading_newline, 34, TK_STRING)
-   end
-
-   return match_punctuator(lex, leading_newline)
-end
-
-local function lex_generator(source: string, file_id: integer, reporter: Reporter | nil): function(): Token
-   local lex_state = new_lexer(source, file_id, reporter)
-   return function(): Token
-      return next_token(lex_state)
-   end
-end
-
-local function lex_all(source: string, file_id: integer, reporter: Reporter | nil): {Token}
-   local iter = lex_generator(source, file_id, reporter)
-   local tokens: {Token} = {}
-   local n = 0
+local function lex_all(source: string, file_id: integer): {Token}
+   local lex = new_lexer(source, file_id)
+   local out: {Token} = {}
    while true do
-      local t = iter()
-      n = n + 1
-      tokens[n] = t
-      if t.kind == TK_EOF then
+      local tc = next_token(lex)
+      out[#out + 1] = token_from_c(lex, tc)
+      if tc.kind == K_EOF then
          break
       end
    end
-   return tokens
+   return out
 end
 
 return {
-   lex = lex_generator,
+   new_lexer = new_lexer,
+   next_token = next_token,
+   lexeme = lexeme,
+   token_from_c = token_from_c,
+   Token = Token,
    lex_all = lex_all,
-   keywords = keywords,
+   LexerState = LexerState,
+   TokenKind = TokenKind,
+   TokenFlags = TokenFlags,
+   K_UNKNOWN = K_UNKNOWN,
+   K_IDENTIFIER = K_IDENTIFIER,
+   K_NUMBER = K_NUMBER,
+   K_STRING = K_STRING,
+   K_CHAR = K_CHAR,
+   K_KEYWORD = K_KEYWORD,
+   K_PUNCT = K_PUNCT,
+   K_EOF = K_EOF,
+   K_COMMENT = K_COMMENT,
+   K_WHITESPACE = K_WHITESPACE,
+   TOKEN_FLAG_NEWLINE = TOKEN_FLAG_NEWLINE,
+   TOKEN_FLAG_LEADING_SPACE = TOKEN_FLAG_LEADING_SPACE,
+   TokenC = TokenC,
 }

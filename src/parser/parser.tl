@@ -1,6 +1,5 @@
 local Span = require("util.span")
-local token_mod = require("lexer.token")
-local LexerFast = require("lexer.lexer_fast")
+local LexerFast = require("lexer.lexer")
 local bit = require("bit")
 local types = require("sema.types")
 local Reporter = require("diag.reporter")
@@ -9,15 +8,15 @@ local ast = require("parser.ast")
 
 local band = bit.band
 
-local type Token = token_mod.Token
-local type TokenKindType = token_mod.TokenKind
-local TK_IDENTIFIER: TokenKindType = "identifier"
-local TK_NUMBER: TokenKindType = "number"
-local TK_STRING: TokenKindType = "string"
-local TK_CHAR: TokenKindType = "char"
-local TK_KEYWORD: TokenKindType = "keyword"
-local TK_PUNCT: TokenKindType = "punctuator"
-local TK_EOF: TokenKindType = "eof"
+local type Token = LexerFast.Token
+local type TokenKindType = LexerFast.TokenKind
+local TK_IDENTIFIER: TokenKindType = LexerFast.K_IDENTIFIER
+local TK_NUMBER: TokenKindType = LexerFast.K_NUMBER
+local TK_STRING: TokenKindType = LexerFast.K_STRING
+local TK_CHAR: TokenKindType = LexerFast.K_CHAR
+local TK_KEYWORD: TokenKindType = LexerFast.K_KEYWORD
+local TK_PUNCT: TokenKindType = LexerFast.K_PUNCT
+local TK_EOF: TokenKindType = LexerFast.K_EOF
 
 local type LexerState = LexerFast.LexerState
 
@@ -64,8 +63,6 @@ local assignment_ops: {string:boolean} = {
    ["<<="] = true, [">>="] = true, ["&="] = true, ["^="] = true, ["|="] = true,
 }
 
-local empty_tbl = {}
-
 local binary_precedence: {string: integer} = {
    ["||"] = 1,
    ["&&"] = 2,
@@ -108,7 +105,12 @@ local function fast_iter(source: string, file_id: integer): TokenIterator
       local kind = token_kind_from_fast(tc.kind)
       local lx = lexeme_from_fast(lexer, tc)
       local span = Span.new(file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
-      return token_mod.Token.new(kind, lx, span, empty_tbl, empty_tbl, band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0)
+      return {
+         kind = kind,
+         lexeme = lx,
+         span = span,
+         has_newline = band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0,
+      }
    end
 end
 

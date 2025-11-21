@@ -1,8 +1,8 @@
 local Span = require("util.span")
-local token_mod = require("lexer.token")
+local LexerFast = require("lexer.lexer")
 local types = require("sema.types")
 
-local type Token = token_mod.Token
+local type Token = LexerFast.Token
 local type TypeNode = types.TypeNode
 local TypeQualifier = types.TypeQualifier
 

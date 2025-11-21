@@ -1,13 +1,16 @@
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local Span = require("util.span")
-local Preprocessor = require("pp.preprocessor_fast")
+local Preprocessor = require("pp.preprocessor")
 local Parser = require("parser.parser")
 local Checker = require("sema.checker")
-local token_mod = require("lexer.token")
+local LexerFast = require("lexer.lexer")
 local ast = require("parser.ast")
 
-local type Token = token_mod.Token
+local type Token = LexerFast.Token
+local K_PUNCT = LexerFast.K_PUNCT
+local K_IDENTIFIER = LexerFast.K_IDENTIFIER
+local K_EOF = LexerFast.K_EOF
 local type TranslationUnit = ast.TranslationUnit
 local type CheckedTranslationUnit = Checker.CheckedTranslationUnit
 
@@ -42,13 +45,13 @@ end
 
 local function dump_tokens(tokens: {Token})
    for _, t in ipairs(tokens) do
-      io.stdout:write(string.format("%s\t%s\n", t.kind, t.lexeme))
+      io.stdout:write(string.format("%d\t%s\n", t.kind, t.lexeme))
    end
 end
 
 local function should_insert_space(prev: Token, cur: Token): boolean
-   if prev.kind == "punctuator" or cur.kind == "punctuator" then
-      return prev.kind == "identifier" and cur.kind == "identifier"
+   if prev.kind == K_PUNCT or cur.kind == K_PUNCT then
+      return prev.kind == K_IDENTIFIER and cur.kind == K_IDENTIFIER
    end
    return true
 end
@@ -65,7 +68,7 @@ local function wrap_iterator(base: function(): Token, capture_tokens: boolean, b
    local prev: Token | nil = nil
 
    local function append_text(tok: Token)
-      if not build_text or tok.kind == "eof" then
+      if not build_text or tok.kind == K_EOF then
          return
       end
       if prev and should_insert_space(prev, tok) then
@@ -80,7 +83,7 @@ local function wrap_iterator(base: function(): Token, capture_tokens: boolean, b
          tokens[#tokens + 1] = t
       end
       append_text(t)
-      if t.kind ~= "eof" then
+      if t.kind ~= K_EOF then
          prev = t
       end
       return t

@@ -2,13 +2,13 @@ local Preprocessor = require("pp.preprocessor")
 local Parser = require("parser.parser")
 local Checker = require("sema.checker")
 local Reporter = require("diag.reporter")
-local token_mod = require("lexer.token")
+local LexerFast = require("lexer.lexer")
 local types = require("sema.types")
 local ast = require("parser.ast")
 
 local type TypeNode = types.TypeNode
 local type TranslationUnit = ast.TranslationUnit
-local type Token = token_mod.Token
+local type Token = LexerFast.Token
 local types_equal = types.equals
 local record FileContext
    path: string | nil
