@@ -20,7 +20,8 @@
 		"vscode": {
 			"extensions": [
 				"pdesaulniers.vscode-teal",
-				"sumneko.lua"
+				"sumneko.lua",
+				"llvm-vs-code-extensions.vscode-clangd"
 			],
 			"settings": {
 				"teal.compilerPath": "/workspaces/c-compiler/lua_modules/bin/tl"
