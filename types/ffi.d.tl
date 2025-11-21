@@ -7,8 +7,10 @@ local record ffi
         metamethod __tostring: function(self): string
     end
 
-    interface Pointer<T is CData> is {T}, CData where require("reflect").typeof(self).what == "ptr" end
-    record CString is Pointer<integer> where (require as function(string): {string:function(any, x: any): boolean})("ffi").istype("char *", self) end
+    interface Pointer<T is CData> is {T}, CData where require("reflect").typeof(self).what == "ptr"
+        metamethod __add: function(self, offset: integer): self
+    end
+    record CString is {integer}, Pointer<integer> where (require as function(string): {string:function(any, x: any): boolean})("ffi").istype("char *", self) end
     type String = CString | string
     interface CInteger is CData where require("reflect").typeof(self).what == "int" end
     interface CFloat is CData where require("reflect").typeof(self).what == "float" end
@@ -59,7 +61,8 @@ local record ffi
     load: function(string): CNamespace
     new: function<T is CData>(ct: CType | string, ...: any): T
     cast: function<T is CData>(ct: CType | string, ...: any): T
-    metatype: function<T is CType>(ct: T | string, metatable: metatable): T
+    -- cast: function<T is CData>(ct: CType | string, f: function()): Function<function(T): nil>
+    metatype: function<T is CType>(ct: T | string, metatable: metatable<T>): T
     gc: function<T is CData>(v: T, f: function(T)): T
     sizeof: function(ct: CType | string | CData, nelem?: integer): integer | nil
     alignof: function(ct: CType | string | CData): integer
