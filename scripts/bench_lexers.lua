@@ -27,6 +27,8 @@ local Reporter = require("diag.reporter")
 local rep = Reporter.new()
 
 local baseline = require("lexer.lexer")
+local ffi_lexer = require("lexer.lexer_ffi")
+local fast_lexer = require("lexer.lexer_fast")
 local function count_tokens(result)
    if type(result) == "function" then
       local n = 0
@@ -38,6 +40,9 @@ local function count_tokens(result)
          end
       end
       return n
+   end
+   if (type(result) == "cdata" or type(result) == "table") and result.count then
+      return tonumber(result.count)
    end
    return #result
 end
@@ -54,6 +59,19 @@ end
 
 bench("baseline (gen)", function()
    return baseline.lex(src, 1, rep)
+end)
+
+bench("ffi (buffer)", function()
+   return ffi_lexer.lex(src, 1)
+end)
+
+bench("ffi (tokens)", function()
+   local lb = ffi_lexer.lex(src, 1)
+   return ffi_lexer.to_token_array(lb)
+end)
+
+bench("fast (gen)", function()
+   return fast_lexer.lex(src, 1, rep)
 end)
 
 local ok, old_lexer = pcall(require, "lexer.lexer_old")
