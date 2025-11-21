@@ -58,4 +58,13 @@ describe("parser complex declarators", function()
       assert.are.equal("builtin", inner.of.tag)
       assert.are.equal("double", inner.of.name)
    end)
+
+   it("skips attributes while keeping declarator shape", function()
+      local tu, rep = parse_with_rep("int __attribute__((aligned(16))) *p __asm__(\"_p\");")
+      assert.are.equal(0, #rep.diagnostics, rep.diagnostics[1] and rep.diagnostics[1].message or "")
+      local decl = tu.decls[1]
+      assert.are.equal("var", decl.kind)
+      assert.are.equal("pointer", decl.type.tag)
+      assert.are.equal("int", decl.type.to.name)
+   end)
 end)

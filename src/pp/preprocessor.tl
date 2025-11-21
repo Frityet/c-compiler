@@ -496,7 +496,14 @@ local function parse_define(tokens: {Token}, state: State)
    local is_function = false
    local params: {string} = {}
    local is_variadic = false
-   if tokens[idx] and tokens[idx].kind == TK_PUNCT and tokens[idx].lexeme == "(" then
+   local next_tok = tokens[idx]
+   local is_adjacent = false
+   if next_tok then
+      local ns = next_tok.span
+      local ms = name_tok.span
+      is_adjacent = ns.file_id == ms.file_id and ns.start_offset == ms.end_offset
+   end
+   if next_tok and next_tok.kind == TK_PUNCT and next_tok.lexeme == "(" and is_adjacent then
       is_function = true
       idx = idx + 1
       while idx <= #tokens do

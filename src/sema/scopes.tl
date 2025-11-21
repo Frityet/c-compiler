@@ -52,6 +52,11 @@ function Scope:lookup(name: string, namespace?: string): symbols.Symbol | nil
    return nil
 end
 
+function Scope:lookup_here(name: string, namespace?: string): symbols.Symbol | nil
+   local bucket = resolve_bucket(self, namespace or "object")
+   return bucket[name]
+end
+
 return {
    Scope = Scope,
 }

@@ -267,6 +267,11 @@ types_equal = function(lhs: TypeNode, rhs: TypeNode): boolean
       return types_equal(lhs.returns, rhs.returns)
    elseif lhs is StructType and rhs is StructType then
       if lhs.name ~= rhs.name then
+         local lhs_anon = lhs.name == nil
+         local rhs_anon = rhs.name == nil
+         if (lhs_anon or rhs_anon) and lhs.complete and rhs.complete then
+            return fields_equal(lhs.fields, rhs.fields)
+         end
          return false
       end
       if lhs.complete and rhs.complete then
@@ -275,6 +280,11 @@ types_equal = function(lhs: TypeNode, rhs: TypeNode): boolean
       return true
    elseif lhs is UnionType and rhs is UnionType then
       if lhs.name ~= rhs.name then
+         local lhs_anon = lhs.name == nil
+         local rhs_anon = rhs.name == nil
+         if (lhs_anon or rhs_anon) and lhs.complete and rhs.complete then
+            return fields_equal(lhs.fields, rhs.fields)
+         end
          return false
       end
       if lhs.complete and rhs.complete then

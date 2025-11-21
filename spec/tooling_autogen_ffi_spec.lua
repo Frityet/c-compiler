@@ -42,4 +42,24 @@ describe("autogen_ffi", function()
       assert.matches("int foo", content)
       assert.matches("Callback", content)
    end)
+
+   it("keeps functions using enums completed later and ignores late forwards", function()
+      local rep = Reporter.new()
+      local rendered = Autogen.generate({
+         headers = { "spec/fixtures/autogen/enum_forward.h" },
+         output = "enum_forward.ffi.tl",
+         ignore_system_includes = true,
+      }, rep)
+
+      assert.is_not_nil(rendered)
+      assert.is_false(rep:has_errors())
+      assert.are.same({}, rendered.warnings)
+
+      local content = assert(rendered.content, "expected generated content")
+      assert.matches("enum Kind", content)
+      assert.matches("struct Later", content)
+      assert.matches("enum Kind make_kind", content)
+      assert.matches("int get_kind%(", content)
+      assert.matches("int use_later%(", content)
+   end)
 end)

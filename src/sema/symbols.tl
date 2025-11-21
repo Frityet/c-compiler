@@ -31,6 +31,7 @@ local record Symbol
    span: Span
    is_tentative: boolean
    is_defined: boolean
+   enum_value: integer | nil
 end
 
 return {

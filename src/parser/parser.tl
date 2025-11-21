@@ -92,6 +92,55 @@ local function advance(p: Parser): Token
    return t
 end
 
+local function is_attribute_token(tok: Token): boolean
+   if tok.kind ~= TK_IDENTIFIER and tok.kind ~= TK_KEYWORD then
+      return false
+   end
+   local lx = tok.lexeme
+   return lx == "__attribute__" or lx == "__attribute" or lx == "__declspec" or lx == "__declspec__" or lx == "__asm" or lx == "__asm__" or lx == "asm"
+end
+
+local function skip_parens(p: Parser)
+   if not at(p, TK_PUNCT, "(") then
+      return
+   end
+   local depth = 0
+   repeat
+      local t = cur(p)
+      if t.kind == TK_PUNCT then
+         if t.lexeme == "(" then
+            depth = depth + 1
+         elseif t.lexeme == ")" then
+            depth = depth - 1
+         end
+      end
+      advance(p)
+      if depth == 0 then
+         break
+      end
+   until cur(p).kind == TK_EOF
+end
+
+local function skip_attributes(p: Parser)
+   while true do
+       local tok = cur(p)
+       local lx = tok.lexeme
+       if tok.kind == TK_IDENTIFIER and (lx == "__attribute__" or lx == "__attribute" or lx == "__declspec" or lx == "__declspec__") then
+          advance(p)
+          while at(p, TK_PUNCT, "(") do
+             skip_parens(p)
+          end
+       elseif tok.kind == TK_IDENTIFIER and (lx == "__asm" or lx == "__asm__" or lx == "asm") then
+          advance(p)
+          if at(p, TK_PUNCT, "(") then
+             skip_parens(p)
+          end
+       else
+          break
+       end
+   end
+end
+
 local function report_error(p: Parser, message: string, span: Span, code: string)
    p.reporter:report(Diagnostic.new("error", message, span, code))
 end
@@ -156,6 +205,9 @@ local function is_builtin_keyword(tok: Token): boolean
 end
 
 local function is_type_specifier_start(p: Parser, tok: Token): boolean
+   if is_attribute_token(tok) then
+      return true
+   end
    if is_builtin_keyword(tok) or is_type_qualifier(tok) or is_storage_class(tok) or is_function_specifier(tok) then
       return true
    end
@@ -166,10 +218,7 @@ local function is_type_specifier_start(p: Parser, tok: Token): boolean
       if string.sub(tok.lexeme, 1, 9) == "__builtin" then
          return true
       end
-      local lookahead = p.tokens[p.pos + 1]
-      if lookahead and (lookahead.kind == TK_IDENTIFIER or (lookahead.kind == TK_PUNCT and (lookahead.lexeme == "(" or lookahead.lexeme == "*" or lookahead.lexeme == "["))) then
-         return true
-      end
+      return is_typedef_name(p, tok)
    end
    return is_typedef_name(p, tok)
 end
@@ -178,6 +227,9 @@ local function looks_like_declaration(p: Parser): boolean
    local t = cur(p)
    if t.kind == TK_EOF then
    	 return false
+   end
+   if is_attribute_token(t) then
+      return true
    end
    if is_type_specifier_start(p, t) then
       return true
@@ -304,6 +356,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
    local is_imaginary = false
 
    while true do
+      skip_attributes(p)
       local tok = cur(p)
       if not start_span then
          start_span = tok.span
@@ -676,7 +729,9 @@ local function parse_parameter_list(p: Parser): ({ast.Parameter}, boolean)
 end
 
 parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
+   skip_attributes(p)
    local pointers = parse_pointer_chain(p)
+   skip_attributes(p)
    local name_tok: Token | nil = nil
    local lparen_span: Span | nil = nil
    if at(p, TK_PUNCT, "(") then
@@ -1071,6 +1126,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
 
    repeat
       local d = parse_declarator(p, false)
+      skip_attributes(p)
       local ty = build_type(specs, d)
       local span = specs.span:merge(d.span)
       local is_function = false
@@ -1336,10 +1392,15 @@ end
 local function parse_translation_unit(p: Parser): ast.TranslationUnit
    local decls: {ast.DeclNode} = {}
    while cur(p).kind ~= TK_EOF do
+      if at(p, TK_PUNCT, ";") then
+         advance(p)
+         goto continue
+      end
       local parsed = parse_external_declaration(p)
       for _, d in ipairs(parsed) do
          table.insert(decls, d)
       end
+      ::continue::
    end
    return { decls = decls }
 end

@@ -157,6 +157,17 @@ describe("preprocessor", function()
       assert.are.same({ "int", "x", "=", "\"v\"", "+", "1", ";", }, lexemes(pp.tokens))
    end)
 
+   it("treats macros with whitespace before '(' as object-like", function()
+      local rep = Reporter.new()
+      local src = table.concat({
+         "#define OBJ (1 + 2)",
+         "int x = OBJ + 3;",
+      }, "\n")
+      local pp = Preprocessor.preprocess(src, 15, rep)
+      assert.are.equal(0, #rep.diagnostics)
+      assert.are.same({ "int", "x", "=", "(", "1", "+", "2", ")", "+", "3", ";" }, lexemes(pp.tokens))
+   end)
+
    it("emits diagnostics for #error", function()
       local rep = Reporter.new()
       local src = "#error fail here\nint x;"

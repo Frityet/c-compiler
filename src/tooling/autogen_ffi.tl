@@ -242,9 +242,11 @@ local function render_c_type(ty: TypeNode, name: string, contextsuffix: string, 
          return nil
       end
       local dim = ""
-      if ty.size ~= nil then
-         dim = tostring(ty.size)
-      elseif ty.size_expr ~= nil then
+      local size_val = ty.size
+      local size_expr = ty.size_expr
+      if not size_val is nil then
+         dim = tostring(size_val)
+      elseif not size_expr is nil then
          local ptr: types.PointerType = { tag = "pointer", span = ty.span, to = ty.of, qualifiers = {} }
          return render_c_type(ptr, name, contextsuffix, ctx, is_typedef)
       end
@@ -295,6 +297,39 @@ local function render_c_type(ty: TypeNode, name: string, contextsuffix: string, 
       end
       return inner
    else
+      if ty is types.StructType then
+         local sname = ty.name
+         if sname is nil and is_typedef and ctx == "default" then
+            local parts: {string} = {}
+            for _, f in ipairs(ty.fields) do
+               local bw = f.bit_width
+               if bw is nil and f.name ~= "" then
+                  local fdecl = render_c_type(f.type, f.name, "", ctx, is_typedef)
+                  if not fdecl then
+                     return nil
+                  end
+                  table.insert(parts, fdecl .. ";")
+               end
+            end
+            return string.format("struct { %s } %s%s", table.concat(parts, " "), name, contextsuffix)
+         end
+      elseif ty is types.UnionType then
+         local uname = ty.name
+         if uname is nil and is_typedef and ctx == "default" then
+            local parts: {string} = {}
+            for _, f in ipairs(ty.fields) do
+               local bw = f.bit_width
+               if bw is nil and f.name ~= "" then
+                  local fdecl = render_c_type(f.type, f.name, "", ctx, is_typedef)
+                  if not fdecl then
+                     return nil
+                  end
+                  table.insert(parts, fdecl .. ";")
+               end
+            end
+            return string.format("union { %s } %s%s", table.concat(parts, " "), name, contextsuffix)
+         end
+      end
       local base = base_type_to_c(ty)
       if not base then
          return nil
@@ -361,7 +396,7 @@ local function numeric_record_class(ty: TypeNode, typedefs: {string: TypeNode}, 
    return nil
 end
 
-local function type_supported(ty: TypeNode, seen: {TypeNode:boolean}): boolean
+local function type_supported(ty: TypeNode, seen: {TypeNode:boolean}, complete_enums?: {string: types.EnumType}): boolean
    if seen[ty] then
       return true
    end
@@ -370,9 +405,9 @@ local function type_supported(ty: TypeNode, seen: {TypeNode:boolean}): boolean
    if ty is types.BuiltinType or ty is types.TypedefType then
       return true
    elseif ty is types.QualifiedType then
-      return type_supported(ty.of, seen)
+      return type_supported(ty.of, seen, complete_enums)
    elseif ty is types.PointerType then
-      return type_supported(ty.to, seen)
+      return type_supported(ty.to, seen, complete_enums)
    elseif ty is types.ArrayType then
       if ty.is_vla then
          return false
@@ -382,57 +417,57 @@ local function type_supported(ty: TypeNode, seen: {TypeNode:boolean}): boolean
       if not size_expr is nil and size_val is nil then
          -- allow arrays with unevaluated constant expressions; assume caller validated
       end
-      return type_supported(ty.of, seen)
+      return type_supported(ty.of, seen, complete_enums)
    elseif ty is types.FunctionType then
-      if not type_supported(ty.returns, seen) then
+      if not type_supported(ty.returns, seen, complete_enums) then
          return false
       end
       for _, p in ipairs(ty.params) do
-         if not type_supported(p.type, seen) then
+         if not type_supported(p.type, seen, complete_enums) then
             return false
          end
       end
       return true
    elseif ty is types.StructType then
-      local sname = ty.name
-      if sname is nil then
-         return false
-      end
       for _, f in ipairs(ty.fields) do
-         if f.bit_width ~= nil then
+         local bw = f.bit_width
+         if not bw is nil then
             return false
          end
          if f.name == "" then
             return false
          end
-         if not type_supported(f.type, seen) then
+         if not type_supported(f.type, seen, complete_enums) then
             return false
          end
       end
       return true
    elseif ty is types.UnionType then
-      local uname = ty.name
-      if uname is nil then
-         return false
-      end
       for _, f in ipairs(ty.fields) do
-         if f.bit_width ~= nil then
+         local bw = f.bit_width
+         if not bw is nil then
             return false
          end
          if f.name == "" then
             return false
          end
-         if not type_supported(f.type, seen) then
+         if not type_supported(f.type, seen, complete_enums) then
             return false
          end
       end
       return true
    elseif ty is types.EnumType then
       local ename = ty.name
-      if ename is nil or not ty.complete then
+      if ename is nil then
          return false
       end
-      return true
+      if ty.complete then
+         return true
+      end
+      if complete_enums and complete_enums[ename] then
+         return true
+      end
+      return false
    end
    return false
 end
@@ -441,12 +476,13 @@ local function collect_type_defs(col: Collected, ty: TypeNode)
    local key = type_name_key(ty)
 
    if ty is types.StructType then
-      if ty.name and not ty.complete then
+      local existing_struct = col.structs[ty.name or ""]
+      if ty.name and not ty.complete and existing_struct is nil then
          col.forwards[ty.name] = "struct"
       end
       if ty.name and ty.complete then
          col.forwards[ty.name] = nil
-         local existing = col.structs[ty.name]
+         local existing = existing_struct or col.structs[ty.name]
          if existing is nil then
             col.structs[ty.name] = ty
          elseif not types_equal(existing, ty) then
@@ -457,12 +493,13 @@ local function collect_type_defs(col: Collected, ty: TypeNode)
          collect_type_defs(col, f.type)
       end
    elseif ty is types.UnionType then
-      if ty.name and not ty.complete then
+      local existing_union = col.unions[ty.name or ""]
+      if ty.name and not ty.complete and existing_union is nil then
          col.forwards[ty.name] = "union"
       end
       if ty.name and ty.complete then
          col.forwards[ty.name] = nil
-         local existing = col.unions[ty.name]
+         local existing = existing_union or col.unions[ty.name]
          if existing is nil then
             col.unions[ty.name] = ty
          elseif not types_equal(existing, ty) then
@@ -507,10 +544,10 @@ local function decl_path(d: ast.DeclNode, rep: Reporter): string | nil
    if d.kind == "func" or d.kind == "typedef" or d.kind == "var" then
       local dd = d as ast.FuncDecl | ast.TypedefDecl | ast.VarDecl
       local name_tok = dd.declarator.name
-      if name_tok ~= nil then
+      if not name_tok is nil then
          local tok: Token = name_tok
          local ctx_any = rep:get_file(tok.span.file_id) as FileContext | nil
-         if ctx_any ~= nil then
+         if not ctx_any is nil then
             local ctx: FileContext = ctx_any as FileContext
             if ctx.path then
                return ctx.path
@@ -520,7 +557,7 @@ local function decl_path(d: ast.DeclNode, rep: Reporter): string | nil
    end
 
    local ctx_any = rep:get_file(d.span.file_id) as FileContext | nil
-   if ctx_any ~= nil then
+   if not ctx_any is nil then
       local ctx: FileContext = ctx_any as FileContext
       if ctx.path then
          return ctx.path
@@ -547,7 +584,7 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
       end
       if d is ast.FuncDecl then
          local name_tok = d.declarator.name
-         if name_tok then
+         if not name_tok is nil then
             local tok: Token = name_tok
             local name = tok.lexeme
             if not has_storage(d.specifiers, "static") then
@@ -562,7 +599,7 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
          collect_type_defs(col, d.type)
       elseif d is ast.TypedefDecl then
          local name_tok = d.declarator.name
-         if name_tok then
+         if not name_tok is nil then
             local tok: Token = name_tok
             local nm = tok.lexeme
             local existing_td = col.typedefs[nm]
@@ -673,8 +710,8 @@ local function type_to_teal(ty: TypeNode, names: {string: string}, wrap_func?: b
    return nil
 end
 
-local function emit_struct(buf: {string}, st: types.StructType, _names: {string:string}): boolean
-   if not type_supported(st, {}) then
+local function emit_struct(buf: {string}, st: types.StructType, _names: {string:string}, complete_enums?: {string: types.EnumType}): boolean
+   if not type_supported(st, {}, complete_enums) then
       return false
    end
    table.insert(buf, "struct " .. st.name .. " {")
@@ -691,8 +728,8 @@ local function emit_struct(buf: {string}, st: types.StructType, _names: {string:
    return true
 end
 
-local function emit_union(buf: {string}, un: types.UnionType): boolean
-   if not type_supported(un, {}) then
+local function emit_union(buf: {string}, un: types.UnionType, complete_enums?: {string: types.EnumType}): boolean
+   if not type_supported(un, {}, complete_enums) then
       return false
    end
    table.insert(buf, "union " .. un.name .. " {")
@@ -713,8 +750,9 @@ local function emit_enum(buf: {string}, en: types.EnumType)
    table.insert(buf, "enum " .. en.name .. " {")
    for idx, v in ipairs(en.values) do
       local line = "  " .. v.name
-      if v.value ~= nil then
-         line = line .. " = " .. tostring(v.value)
+      local vval = v.value
+      if not vval is nil then
+         line = line .. " = " .. tostring(vval)
       end
       if idx < #en.values then
          line = line .. ","
@@ -773,7 +811,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
       table.insert(cdef_lines, string.format("typedef %s %s %s;", kind, nm, nm))
    end
    for _, en in pairs(collectd.enums) do
-      if type_supported(en, {}) then
+      if type_supported(en, {}, collectd.enums) then
          emit_enum(cdef_lines, en)
          table.insert(cdef_lines, "")
       else
@@ -781,14 +819,14 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
       end
    end
    for _, st in pairs(collectd.structs) do
-      if emit_struct(cdef_lines, st, names) then
+      if emit_struct(cdef_lines, st, names, collectd.enums) then
          table.insert(cdef_lines, "")
       else
          table.insert(collectd.warnings, "skipping struct " .. (st.name or "<anon>") .. " (unsupported)")
       end
    end
    for _, un in pairs(collectd.unions) do
-      if emit_union(cdef_lines, un) then
+      if emit_union(cdef_lines, un, collectd.enums) then
          table.insert(cdef_lines, "")
       else
          table.insert(collectd.warnings, "skipping union " .. (un.name or "<anon>") .. " (unsupported)")
@@ -797,7 +835,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
    for _, nm in ipairs(sorted_keys(collectd.typedefs)) do
       local ty = collectd.typedefs[nm]
       local fwd = collectd.forwards[nm]
-      if type_supported(ty, {}) and fwd is nil then
+      if type_supported(ty, {}, collectd.enums) and fwd is nil then
          local decl = render_c_type(ty, nm, "", "default", true)
          if decl then
             local d = decl as string
@@ -812,7 +850,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
    end
    for _, nm in ipairs(sorted_keys(collectd.functions)) do
       local fn_ty = collectd.functions[nm]
-      if type_supported(fn_ty, {}) then
+      if type_supported(fn_ty, {}, collectd.enums) then
          local decl = render_c_type(fn_ty, nm, "", "default")
          if decl then
             table.insert(cdef_lines, decl .. ";")
@@ -833,7 +871,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
       return name
    end
    for _, st in pairs(collectd.structs) do
-      if type_supported(st, {}) then
+      if type_supported(st, {}, collectd.enums) then
          local nm = names["struct:" .. st.name] or st.name
          local raw_name = apply_strip(nm)
          local field_name = take_field(raw_name)
@@ -856,7 +894,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
       end
    end
    for _, un in pairs(collectd.unions) do
-      if type_supported(un, {}) then
+      if type_supported(un, {}, collectd.enums) then
          local nm = names["union:" .. un.name] or un.name
          local raw_name = apply_strip(nm)
          local field_name = take_field(raw_name)
@@ -891,7 +929,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
    end
    local enum_type_aliases: {string} = {}
    for _, en in pairs(collectd.enums) do
-      if type_supported(en, {}) and en.name then
+      if type_supported(en, {}, collectd.enums) and en.name then
          local nm = names["enum:" .. en.name] or en.name
          table.insert(enum_type_aliases, "type " .. apply_strip(nm) .. " = integer")
       end
@@ -899,7 +937,9 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
    local typedef_records: {string} = {}
    for nm, ty in pairs(collectd.typedefs) do
       local fwd = collectd.forwards[nm]
-      if type_supported(ty, {}) and fwd is nil and collectd.structs[nm] == nil and collectd.unions[nm] == nil then
+      local st_def = collectd.structs[nm]
+      local un_def = collectd.unions[nm]
+      if type_supported(ty, {}, collectd.enums) and fwd is nil and st_def is nil and un_def is nil then
          local tn = names["typedef:" .. nm] or sanitize(nm)
          local raw_name = apply_strip(tn)
          local field_name = take_field(raw_name)
@@ -915,7 +955,7 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
 
    local fn_sigs: {string} = {}
    for nm, fn_ty in pairs(collectd.functions) do
-      if type_supported(fn_ty, {}) then
+      if type_supported(fn_ty, {}, collectd.enums) then
          local sig = type_to_teal(fn_ty, names, true, strip_prefix)
          if sig then
             local fname = apply_strip(nm)
@@ -1048,7 +1088,7 @@ local function generate(opts: GenerateOptions, reporter?: Reporter, writer?: fun
          no_system_paths = false,
       })
       local tu = Parser.parse(pp.text, pp.file_id, rep, pp.tokens)
-      local checked = Checker.check(tu, rep)
+      local checked = Checker.check(tu, rep, { allow_incomplete_params = true })
       collect(col, checked.tu, rep, opts.ignore_system_includes or false, allow)
    end
 
