@@ -269,15 +269,21 @@ local function render_c_type(ty: TypeNode, name: string, contextsuffix: string, 
       elseif #params == 0 then
          table.insert(params, "void")
       end
-      local call_sig = "(" .. table.concat(params, ", ") .. ")" .. contextsuffix
-      local inner_name = name
-      if contextsuffix ~= "" then
-         inner_name = "(" .. inner_name .. ")"
+      local call_sig = "(" .. table.concat(params, ", ") .. ")"
+      local ret = render_c_type(ty.returns, "", "", ctx, is_typedef)
+      if not ret then
+         return nil
       end
+      local inner_name = name
       if is_typedef and name ~= "" then
          inner_name = string.format("(*%s)", name)
+      elseif contextsuffix ~= "" and name ~= "" then
+         inner_name = "(" .. name .. ")"
       end
-      return render_c_type(ty.returns, inner_name, call_sig, ctx, is_typedef)
+      if inner_name ~= "" then
+         return string.format("%s %s%s%s", ret, inner_name, call_sig, contextsuffix)
+      end
+      return string.format("%s%s%s", ret, call_sig, contextsuffix)
    elseif ty is types.QualifiedType then
       local inner = render_c_type(ty.of, name, contextsuffix, ctx, is_typedef)
       if not inner then
@@ -325,6 +331,32 @@ local function type_name_key(ty: TypeNode): string | nil
       end
    elseif ty is types.TypedefType then
       return "typedef:" .. ty.name
+   end
+   return nil
+end
+
+local function numeric_record_class(ty: TypeNode, typedefs: {string: TypeNode}, seen?: {string:boolean}): string | nil
+   local visited = seen or {}
+   if ty is types.QualifiedType then
+      return numeric_record_class(ty.of, typedefs, visited)
+   elseif ty is types.TypedefType then
+      local nm = ty.name
+      if visited[nm] then
+         return nil
+      end
+      visited[nm] = true
+      local aliased = typedefs[nm]
+      if aliased then
+         return numeric_record_class(aliased, typedefs, visited)
+      end
+      return nil
+   elseif ty is types.BuiltinType then
+      local n = ty.name
+      if n == "float" or n == "double" or n == "long_double" then
+         return "ffi.CFloat"
+      elseif n ~= "void" and n ~= "bool" then
+         return "ffi.CInteger"
+      end
    end
    return nil
 end
@@ -593,7 +625,21 @@ local function type_to_teal(ty: TypeNode, names: {string: string}, wrap_func?: b
    elseif ty is types.QualifiedType then
       return type_to_teal(ty.of, names, wrap_func, strip_prefix)
    elseif ty is types.PointerType then
-      local inner = type_to_teal(ty.to, names, wrap_func, strip_prefix) or "ffi.CData"
+      local to_ty = ty.to
+      if to_ty is types.QualifiedType then
+         local has_const = false
+         for _, q in ipairs(to_ty.qualifiers) do
+            if q == "const" then
+               has_const = true
+               break
+            end
+         end
+         local base = to_ty.of
+         if has_const and base is types.BuiltinType and base.name == "char" then
+            return "ffi.String"
+         end
+      end
+      local inner = type_to_teal(to_ty, names, wrap_func, strip_prefix) or "ffi.CData"
       return "ffi.Pointer<" .. inner .. ">"
    elseif ty is types.ArrayType then
       local inner = type_to_teal(ty.of, names, wrap_func, strip_prefix)
@@ -620,7 +666,7 @@ local function type_to_teal(ty: TypeNode, names: {string: string}, wrap_func?: b
       local ret = type_to_teal(ty.returns, names, wrap_func, strip_prefix) or "nil"
       local param_str = table.concat(params, ", ")
       if wrap_func then
-         return string.format("ffi.Function<function(ffi.NilFunc, %s): %s>", param_str, ret)
+         return string.format("ffi.Function<function(ffi.Function<nil>, %s): %s>", param_str, ret)
       end
       return "function(" .. param_str .. "): " .. ret
    end
@@ -860,7 +906,8 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
          if field_name is nil then
             goto continue_typedef_record
          end
-         local decl = string.format("local record %s is ffi.CData where ffi.istype(\"%s\", self) end", field_name, nm)
+         local base_class = numeric_record_class(ty, collectd.typedefs) or "ffi.CData"
+         local decl = string.format("local record %s is %s where ffi.istype(\"%s\", self) end", field_name, base_class, nm)
          table.insert(typedef_records, decl)
          ::continue_typedef_record::
       end
@@ -924,20 +971,44 @@ local function render(collectd: Collected, headers: {string}, opts: GenerateOpti
    emit(string.format('local STRIP_PREFIX = %q', opts.strip_prefix or ""))
    emit("")
    local load_expr = opts.load_library and string.format('ffi.load("%s")', opts.load_library) or "ffi.C"
-   emit(string.format("local %s: %s = %s as %s", libtag, libtag, load_expr, libtag))
+   emit(string.format("local raw = %s", load_expr))
    emit("")
    if opts.strip_prefix and opts.strip_prefix ~= "" then
-      emit("getmetatable(" .. libtag .. ").__index = function(self: {string:any}, key: string): any")
-      emit("   local ckey = STRIP_PREFIX .. key")
-      emit("   local val = rawget(self, ckey)")
-      emit("   if not val is nil then return val end")
-      emit("   val = rawget(self, key)")
-      emit("   if not val is nil then return val end")
-      emit("   error(\"attempt to access undefined member '\" .. key .. \"'\")")
-      emit("end")
+         emit [[
+local lib = setmetatable({
+   cdef = cdef
+}, {
+   __index = function(self: {string:any}, key: string): any
+      local ckey = STRIP_PREFIX .. key
+      local ok, val = pcall(function(): any return raw[ckey] end)
+      if ok and not val is nil then
+         rawset(self, key, val)
+         return val
+      end
+      local v = raw[key]
+      rawset(self, key, v)
+      return v
+   end,
+
+   __newindex = function(self: {string:any}, key: string, value: any): nil
+      local ckey = STRIP_PREFIX .. key
+      local ok = pcall(function(): nil raw[ckey] = value end)
+      if ok then return end
+      raw[key] = value
+   end,
+})
+         ]]
+      -- emit("getmetatable(" .. libtag .. ").__index = function(self: {string:any}, key: string): any")
+      -- emit("   local ckey = STRIP_PREFIX .. key")
+      -- emit("   local val = rawget(self, ckey)")
+      -- emit("   if not val is nil then return val end")
+      -- emit("   val = rawget(self, key)")
+      -- emit("   if not val is nil then return val end")
+      -- emit("   error(\"attempt to access undefined member '\" .. key .. \"'\")")
+      -- emit("end")
       emit("")
    end
-   emit("return " .. libtag)
+   emit("return lib as " .. libtag)
 
    local content: string | nil = nil
    if not writer then

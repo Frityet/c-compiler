@@ -60,10 +60,12 @@ int lua_gethookmask(lua_State * L);
 int lua_geti(lua_State * L, int idx, lua_Integer n);
 int lua_getinfo(lua_State * L, const char * what, lua_Debug * ar);
 int lua_getiuservalue(lua_State * L, int idx, int n);
+const char * lua_getlocal(lua_State * L, const lua_Debug * ar, int n);
 int lua_getmetatable(lua_State * L, int objindex);
 int lua_getstack(lua_State * L, int level, lua_Debug * ar);
 int lua_gettable(lua_State * L, int idx);
 int lua_gettop(lua_State * L);
+const char * lua_getupvalue(lua_State * L, int funcindex, int n);
 int lua_iscfunction(lua_State * L, int idx);
 int lua_isinteger(lua_State * L, int idx);
 int lua_isnumber(lua_State * L, int idx);
@@ -72,16 +74,23 @@ int lua_isuserdata(lua_State * L, int idx);
 int lua_isyieldable(lua_State * L);
 void lua_len(lua_State * L, int idx);
 int lua_load(lua_State * L, lua_Reader reader, void * dt, const char * chunkname, const char * mode);
+lua_State * lua_newstate(lua_Alloc f, void * ud);
+lua_State * lua_newthread(lua_State * L);
+void * lua_newuserdatauv(lua_State * L, size_t sz, int nuvalue);
 int lua_next(lua_State * L, int idx);
 int lua_pcallk(lua_State * L, int nargs, int nresults, int errfunc, lua_KContext ctx, lua_KFunction k);
 void lua_pushboolean(lua_State * L, int b);
 void lua_pushcclosure(lua_State * L, lua_CFunction fn, int n);
+const char * lua_pushfstring(lua_State * L, const char * fmt, ...);
 void lua_pushinteger(lua_State * L, lua_Integer n);
 void lua_pushlightuserdata(lua_State * L, void * p);
+const char * lua_pushlstring(lua_State * L, const char * s, size_t len);
 void lua_pushnil(lua_State * L);
 void lua_pushnumber(lua_State * L, lua_Number n);
+const char * lua_pushstring(lua_State * L, const char * s);
 int lua_pushthread(lua_State * L);
 void lua_pushvalue(lua_State * L, int idx);
+const char * lua_pushvfstring(lua_State * L, const char * fmt, va_list argp);
 int lua_rawequal(lua_State * L, int idx1, int idx2);
 int lua_rawget(lua_State * L, int idx);
 int lua_rawgeti(lua_State * L, int idx, lua_Integer n);
@@ -100,9 +109,11 @@ void lua_setglobal(lua_State * L, const char * name);
 void lua_sethook(lua_State * L, lua_Hook func, int mask, int count);
 void lua_seti(lua_State * L, int idx, lua_Integer n);
 int lua_setiuservalue(lua_State * L, int idx, int n);
+const char * lua_setlocal(lua_State * L, const lua_Debug * ar, int n);
 int lua_setmetatable(lua_State * L, int objindex);
 void lua_settable(lua_State * L, int idx);
 void lua_settop(lua_State * L, int idx);
+const char * lua_setupvalue(lua_State * L, int funcindex, int n);
 void lua_setwarnf(lua_State * L, lua_WarnFunction f, void * ud);
 int lua_status(lua_State * L);
 size_t lua_stringtonumber(lua_State * L, const char * s);
@@ -110,8 +121,14 @@ int lua_toboolean(lua_State * L, int idx);
 lua_CFunction lua_tocfunction(lua_State * L, int idx);
 void lua_toclose(lua_State * L, int idx);
 lua_Integer lua_tointegerx(lua_State * L, int idx, int * isnum);
+const char * lua_tolstring(lua_State * L, int idx, size_t * len);
 lua_Number lua_tonumberx(lua_State * L, int idx, int * isnum);
+const void * lua_topointer(lua_State * L, int idx);
+lua_State * lua_tothread(lua_State * L, int idx);
+void * lua_touserdata(lua_State * L, int idx);
 int lua_type(lua_State * L, int idx);
+const char * lua_typename(lua_State * L, int tp);
+void * lua_upvalueid(lua_State * L, int fidx, int n);
 void lua_upvaluejoin(lua_State * L, int fidx1, int n1, int fidx2, int n2);
 lua_Number lua_version(lua_State * L);
 void lua_warning(lua_State * L, const char * msg, int tocont);
@@ -126,13 +143,13 @@ local record lua
 
       event: integer
 
-      name: ffi.Pointer<integer>
+      name: ffi.String
 
-      namewhat: ffi.Pointer<integer>
+      namewhat: ffi.String
 
-      what: ffi.Pointer<integer>
+      what: ffi.String
 
-      source: ffi.Pointer<integer>
+      source: ffi.String
 
       srclen: size_t
 
@@ -166,126 +183,158 @@ local record lua
 
    record va_list is ffi.CData where ffi.istype("va_list", self) end
 
-   record Integer is ffi.CData where ffi.istype("lua_Integer", self) end
+   record Hook is ffi.CData where ffi.istype("lua_Hook", self) end
+
+   record WarnFunction is ffi.CData where ffi.istype("lua_WarnFunction", self) end
+
+   record Number is ffi.CFloat where ffi.istype("lua_Number", self) end
+
+   record Integer is ffi.CInteger where ffi.istype("lua_Integer", self) end
 
    record Writer is ffi.CData where ffi.istype("lua_Writer", self) end
 
    record KFunction is ffi.CData where ffi.istype("lua_KFunction", self) end
 
-   record Hook is ffi.CData where ffi.istype("lua_Hook", self) end
+   record size_t is ffi.CData where ffi.istype("size_t", self) end
 
    record KContext is ffi.CData where ffi.istype("lua_KContext", self) end
-
-   record Unsigned is ffi.CData where ffi.istype("lua_Unsigned", self) end
-
-   record Reader is ffi.CData where ffi.istype("lua_Reader", self) end
-
-   record CFunction is ffi.CData where ffi.istype("lua_CFunction", self) end
 
    record intptr_t is ffi.CData where ffi.istype("intptr_t", self) end
 
    record Alloc is ffi.CData where ffi.istype("lua_Alloc", self) end
 
-   record size_t is ffi.CData where ffi.istype("size_t", self) end
+   record Unsigned is ffi.CInteger where ffi.istype("lua_Unsigned", self) end
 
-   record WarnFunction is ffi.CData where ffi.istype("lua_WarnFunction", self) end
+   record Reader is ffi.CData where ffi.istype("lua_Reader", self) end
 
-   record Number is ffi.CData where ffi.istype("lua_Number", self) end
+   record CFunction is ffi.CData where ffi.istype("lua_CFunction", self) end
 
-   tointegerx: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, isnum: ffi.Pointer<integer>): Integer>
-   toboolean: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   rawlen: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): Unsigned>
-   tocfunction: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): CFunction>
-   arith: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, op: integer): nil>
-   rawequal: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx1: integer, idx2: integer): integer>
-   resume: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, from: ffi.Pointer<State>, narg: integer, nres: ffi.Pointer<integer>): integer>
-   compare: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx1: integer, idx2: integer, op: integer): integer>
-   status: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   isyieldable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   pushinteger: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, n: Integer): nil>
-   getinfo: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, what: ffi.Pointer<integer>, ar: ffi.Pointer<Debug>): integer>
-   setwarnf: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, f: WarnFunction, ud: ffi.Pointer<nil>): nil>
-   warning: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, msg: ffi.Pointer<integer>, tocont: integer): nil>
-   upvaluejoin: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, fidx1: integer, n1: integer, fidx2: integer, n2: integer): nil>
-   pushcclosure: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, fn: CFunction, n: integer): nil>
-   pushboolean: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, b: integer): nil>
-   gc: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, what: integer, ...: any): integer>
-   gethook: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): Hook>
-   pushthread: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   next: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   getglobal: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, name: ffi.Pointer<integer>): integer>
-   len: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   gettable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   getfield: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, k: ffi.Pointer<integer>): integer>
-   setallocf: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, f: Alloc, ud: ffi.Pointer<nil>): nil>
-   geti: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: Integer): integer>
-   rawget: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   rawgeti: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: Integer): integer>
-   rawgetp: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, p: ffi.Pointer<nil>): integer>
-   createtable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, narr: integer, nrec: integer): nil>
-   getmetatable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, objindex: integer): integer>
-   getiuservalue: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: integer): integer>
-   setglobal: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, name: ffi.Pointer<integer>): nil>
-   settable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   setfield: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, k: ffi.Pointer<integer>): nil>
-   seti: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: Integer): nil>
-   rawset: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   rawseti: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: Integer): nil>
-   rawsetp: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, p: ffi.Pointer<nil>): nil>
-   setmetatable: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, objindex: integer): integer>
-   setiuservalue: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: integer): integer>
-   callk: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, nargs: integer, nresults: integer, ctx: ffi.CData, k: KFunction): nil>
-   close: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): nil>
-   setcstacklimit: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, limit: integer): integer>
-   closethread: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, from: ffi.Pointer<State>): integer>
-   gethookcount: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   gethookmask: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   resetthread: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   sethook: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, func: Hook, mask: integer, count: integer): nil>
-   getstack: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, level: integer, ar: ffi.Pointer<Debug>): integer>
-   closeslot: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   atpanic: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, panicf: CFunction): CFunction>
-   toclose: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   version: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): Number>
-   getallocf: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, ud: ffi.Pointer<ffi.Pointer<nil>>): Alloc>
-   absindex: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   gettop: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   settop: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   pushvalue: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): nil>
-   rotate: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, n: integer): nil>
-   copy: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, fromidx: integer, toidx: integer): nil>
-   stringtonumber: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, s: ffi.Pointer<integer>): size_t>
-   pcallk: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, nargs: integer, nresults: integer, errfunc: integer, ctx: ffi.CData, k: KFunction): integer>
-   checkstack: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, n: integer): integer>
-   xmove: ffi.Function<function(ffi.NilFunc, from: ffi.Pointer<State>, to: ffi.Pointer<State>, n: integer): nil>
-   concat: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, n: integer): nil>
-   error: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): integer>
-   pushnumber: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, n: Number): nil>
-   isnumber: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   isstring: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   iscfunction: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   isinteger: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   load: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, reader: Reader, dt: ffi.Pointer<nil>, chunkname: ffi.Pointer<integer>, mode: ffi.Pointer<integer>): integer>
-   type: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   pushnil: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>): nil>
-   pushlightuserdata: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, p: ffi.Pointer<nil>): nil>
-   isuserdata: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer): integer>
-   tonumberx: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, idx: integer, isnum: ffi.Pointer<integer>): Number>
-   dump: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, writer: Writer, data: ffi.Pointer<nil>, strip: integer): integer>
-   yieldk: ffi.Function<function(ffi.NilFunc, L: ffi.Pointer<State>, nresults: integer, ctx: ffi.CData, k: KFunction): integer>
+   pushstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, s: ffi.String): ffi.String>
+   pushvfstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fmt: ffi.String, argp: va_list): ffi.String>
+   pushfstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fmt: ffi.String, ...: any): ffi.String>
+   pushcclosure: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fn: CFunction, n: integer): nil>
+   pushboolean: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, b: integer): nil>
+   pushlightuserdata: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, p: ffi.Pointer<nil>): nil>
+   pushthread: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   getglobal: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, name: ffi.String): integer>
+   gettable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   getfield: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, k: ffi.String): integer>
+   geti: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: Integer): integer>
+   rawget: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   rawgeti: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: Integer): integer>
+   rawgetp: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, p: ffi.Pointer<nil>): integer>
+   createtable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, narr: integer, nrec: integer): nil>
+   newuserdatauv: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, sz: size_t, nuvalue: integer): ffi.Pointer<nil>>
+   getmetatable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, objindex: integer): integer>
+   getiuservalue: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: integer): integer>
+   setglobal: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, name: ffi.String): nil>
+   settable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   setfield: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, k: ffi.String): nil>
+   seti: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: Integer): nil>
+   rawset: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   rawseti: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: Integer): nil>
+   rawsetp: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, p: ffi.Pointer<nil>): nil>
+   setmetatable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, objindex: integer): integer>
+   newstate: ffi.Function<function(ffi.Function<nil>, f: Alloc, ud: ffi.Pointer<nil>): ffi.Pointer<State>>
+   callk: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, nargs: integer, nresults: integer, ctx: ffi.CData, k: KFunction): nil>
+   close: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): nil>
+   newthread: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): ffi.Pointer<State>>
+   closethread: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, from: ffi.Pointer<State>): integer>
+   getinfo: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, what: ffi.String, ar: ffi.Pointer<Debug>): integer>
+   resetthread: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   getlocal: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, ar: ffi.Pointer<Debug>, n: integer): ffi.String>
+   setlocal: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, ar: ffi.Pointer<Debug>, n: integer): ffi.String>
+   atpanic: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, panicf: CFunction): CFunction>
+   version: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): Number>
+   absindex: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   gettop: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   settop: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   pushvalue: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   rotate: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: integer): nil>
+   copy: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fromidx: integer, toidx: integer): nil>
+   pcallk: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, nargs: integer, nresults: integer, errfunc: integer, ctx: ffi.CData, k: KFunction): integer>
+   checkstack: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, n: integer): integer>
+   xmove: ffi.Function<function(ffi.Function<nil>, from: ffi.Pointer<State>, to: ffi.Pointer<State>, n: integer): nil>
+   concat: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, n: integer): nil>
+   len: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   isnumber: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   isstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   iscfunction: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   isinteger: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   isuserdata: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   type: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   typename: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, tp: integer): ffi.String>
+   tonumberx: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, isnum: ffi.Pointer<integer>): Number>
+   setcstacklimit: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, limit: integer): integer>
+   getstack: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, level: integer, ar: ffi.Pointer<Debug>): integer>
+   getupvalue: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, funcindex: integer, n: integer): ffi.String>
+   tointegerx: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, isnum: ffi.Pointer<integer>): Integer>
+   toboolean: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   tolstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, len: ffi.Pointer<size_t>): ffi.String>
+   setupvalue: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, funcindex: integer, n: integer): ffi.String>
+   rawlen: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): Unsigned>
+   tocfunction: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): CFunction>
+   upvaluejoin: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fidx1: integer, n1: integer, fidx2: integer, n2: integer): nil>
+   touserdata: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): ffi.Pointer<nil>>
+   tothread: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): ffi.Pointer<State>>
+   topointer: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): ffi.Pointer<nil>>
+   upvalueid: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, fidx: integer, n: integer): ffi.Pointer<nil>>
+   sethook: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, func: Hook, mask: integer, count: integer): nil>
+   status: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   isyieldable: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   gethook: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): Hook>
+   gethookmask: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   gethookcount: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   setwarnf: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, f: WarnFunction, ud: ffi.Pointer<nil>): nil>
+   warning: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, msg: ffi.String, tocont: integer): nil>
+   closeslot: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   toclose: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): nil>
+   setallocf: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, f: Alloc, ud: ffi.Pointer<nil>): nil>
+   getallocf: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, ud: ffi.Pointer<ffi.Pointer<nil>>): Alloc>
+   stringtonumber: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, s: ffi.String): size_t>
+   setiuservalue: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer, n: integer): integer>
+   error: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): integer>
+   arith: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, op: integer): nil>
+   dump: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, writer: Writer, data: ffi.Pointer<nil>, strip: integer): integer>
+   resume: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, from: ffi.Pointer<State>, narg: integer, nres: ffi.Pointer<integer>): integer>
+   yieldk: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, nresults: integer, ctx: ffi.CData, k: KFunction): integer>
+   rawequal: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx1: integer, idx2: integer): integer>
+   gc: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, what: integer, ...: any): integer>
+   load: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, reader: Reader, dt: ffi.Pointer<nil>, chunkname: ffi.String, mode: ffi.String): integer>
+   compare: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx1: integer, idx2: integer, op: integer): integer>
+   next: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, idx: integer): integer>
+   pushnil: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>): nil>
+   pushnumber: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, n: Number): nil>
+   pushinteger: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, n: Integer): nil>
+   pushlstring: ffi.Function<function(ffi.Function<nil>, L: ffi.Pointer<State>, s: ffi.String, len: size_t): ffi.String>
 end
 
 local STRIP_PREFIX = "lua_"
 
-local lua: lua = ffi.load("lua") as lua
+local raw = ffi.load("lua")
 
-getmetatable(lua).__index = function(self: {string:any}, key: string): any
-   local ckey = STRIP_PREFIX .. key
-   local val = rawget(self, ckey)
-   if not val is nil then return val end
-   val = rawget(self, key)
-   if not val is nil then return val end
-   error("attempt to access undefined member '" .. key .. "'")
-end
+local lib = setmetatable({
+   cdef = cdef
+}, {
+   __index = function(self: {string:any}, key: string): any
+      local ckey = STRIP_PREFIX .. key
+      local ok, val = pcall(function(): any return raw[ckey] end)
+      if ok and not val is nil then
+         rawset(self, key, val)
+         return val
+      end
+      local v = raw[key]
+      rawset(self, key, v)
+      return v
+   end,
 
-return lua
+   __newindex = function(self: {string:any}, key: string, value: any): nil
+      local ckey = STRIP_PREFIX .. key
+      local ok = pcall(function(): nil raw[ckey] = value end)
+      if ok then return end
+      raw[key] = value
+   end,
+})
+         
+
+return lib as lua

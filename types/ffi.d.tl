@@ -7,13 +7,17 @@ local record ffi
         metamethod __tostring: function(self): string
     end
 
-    record Pointer<T is CData> is {T}, CData where require("reflect").typeof(self).what == "ptr" end
-    record Reference<T is CData> is T, CData where require("reflect").typeof(self).what == "ref" end
-    record Array<T is CData> is {T}, CData where require("reflect").typeof(self).what == "array" end
+    interface Pointer<T is CData> is {T}, CData where require("reflect").typeof(self).what == "ptr" end
+    record CString is Pointer<integer> where (require as function(string): {string:function(any, x: any): boolean})("ffi").istype("char *", self) end
+    type String = CString | string
+    interface CInteger is CData where require("reflect").typeof(self).what == "int" end
+    interface CFloat is CData where require("reflect").typeof(self).what == "float" end
+    interface Reference<T is CData> is T, CData where require("reflect").typeof(self).what == "ref" end
+    interface Array<T is CData> is {T}, CData where require("reflect").typeof(self).what == "array" end
     record Function<T> is CData where require("reflect").typeof(self).what == "func"
         metamethod __call: T
     end
-    type NilFunc = Function<nil>
+    type NilFunc = Function<function(any): nil>
 
     enum OperatingSystem
         "Windows"
@@ -45,7 +49,10 @@ local record ffi
         "other"
     end
 
-    type CNamespace = { string : CData }
+    type CNamespace = { string : any }
+    -- record CNamespace is userdata
+    --     __index: function<T>(self: CNamespace, key: string): T
+    -- end
 
     cdef: function(string)
     typeof: function(string | CType | CData): CType

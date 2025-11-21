@@ -1073,10 +1073,10 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
       local d = parse_declarator(p, false)
       local ty = build_type(specs, d)
       local span = specs.span:merge(d.span)
-      local last = d.derived[#d.derived]
       local is_function = false
-      if last then
-         is_function = last is ast.FunctionDeclarator
+      local outer = d.derived[1]
+      if outer then
+         is_function = outer is ast.FunctionDeclarator
       end
       if is_function then
          if is_typedef_specifier(specs) then
