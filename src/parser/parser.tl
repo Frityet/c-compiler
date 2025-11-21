@@ -1,10 +1,13 @@
 local Span = require("util.span")
 local token_mod = require("lexer.token")
-local Lexer = require("lexer.lexer")
+local LexerFast = require("lexer.lexer_fast")
+local bit = require("bit")
 local types = require("sema.types")
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local ast = require("parser.ast")
+
+local band = bit.band
 
 local type Token = token_mod.Token
 local type TokenKindType = token_mod.TokenKind
@@ -15,6 +18,25 @@ local TK_CHAR: TokenKindType = "char"
 local TK_KEYWORD: TokenKindType = "keyword"
 local TK_PUNCT: TokenKindType = "punctuator"
 local TK_EOF: TokenKindType = "eof"
+
+local type LexerState = LexerFast.LexerState
+
+local record TokenC
+   start: integer
+   stop: integer
+   line: integer
+   col: integer
+   kind: integer
+   flags: integer
+end
+
+local K_IDENTIFIER = LexerFast.K_IDENTIFIER
+local K_NUMBER = LexerFast.K_NUMBER
+local K_STRING = LexerFast.K_STRING
+local K_CHAR = LexerFast.K_CHAR
+local K_KEYWORD = LexerFast.K_KEYWORD
+local K_PUNCT = LexerFast.K_PUNCT
+local TOKEN_FLAG_NEWLINE = LexerFast.TOKEN_FLAG_NEWLINE
 
 local type TokenIterator = function(): Token
 
@@ -42,6 +64,8 @@ local assignment_ops: {string:boolean} = {
    ["<<="] = true, [">>="] = true, ["&="] = true, ["^="] = true, ["|="] = true,
 }
 
+local empty_tbl = {}
+
 local binary_precedence: {string: integer} = {
    ["||"] = 1,
    ["&&"] = 2,
@@ -61,6 +85,31 @@ local record Parser
    lookahead: Token
    reporter: Reporter
    typedef_scopes: {{string:boolean}}
+end
+
+local function token_kind_from_fast(kind_id: integer): TokenKindType
+   if kind_id == K_IDENTIFIER then return TK_IDENTIFIER end
+   if kind_id == K_NUMBER then return TK_NUMBER end
+   if kind_id == K_STRING then return TK_STRING end
+   if kind_id == K_CHAR then return TK_CHAR end
+   if kind_id == K_KEYWORD then return TK_KEYWORD end
+   if kind_id == K_PUNCT then return TK_PUNCT end
+   return TK_EOF
+end
+
+local function lexeme_from_fast(lexer: LexerState, tc: TokenC): string
+   return string.sub(lexer.src, tc.start + 1, tc.stop)
+end
+
+local function fast_iter(source: string, file_id: integer): TokenIterator
+   local lexer = LexerFast.new_lexer(source, file_id)
+   return function(): Token
+      local tc = LexerFast.next_token(lexer) as TokenC
+      local kind = token_kind_from_fast(tc.kind)
+      local lx = lexeme_from_fast(lexer, tc)
+      local span = Span.new(file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
+      return token_mod.Token.new(kind, lx, span, empty_tbl, empty_tbl, band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0)
+   end
 end
 
 local function new_parser(iter: TokenIterator, reporter: Reporter): Parser
@@ -1438,13 +1487,15 @@ local function parse_translation_unit(p: Parser): ast.TranslationUnit
    return { decls = decls }
 end
 
-local function parse_source(source: string, file_id: integer, reporter?: Reporter, tokens?: {Token}): ast.TranslationUnit
+local function parse_source(source: string, file_id: integer, reporter?: Reporter, tokens?: {Token}, iterator?: TokenIterator): ast.TranslationUnit
    local rep = reporter or Reporter.new()
    local iter: TokenIterator
-   if tokens then
+   if iterator then
+      iter = iterator
+   elseif tokens then
       iter = tokens_to_iter(tokens)
    else
-      iter = Lexer.lex(source, file_id, rep)
+      iter = fast_iter(source, file_id)
    end
    local p = new_parser(iter, rep)
    return parse_translation_unit(p)

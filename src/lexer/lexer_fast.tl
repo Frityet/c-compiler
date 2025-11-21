@@ -36,7 +36,6 @@ typedef struct {
 } tl_token_fast;
 ]]
 
--- Custom FFI Records for Type Safety
 local record TokenC is ffi.CData
    where ffi.istype("tl_token_fast", self)
    start: integer
@@ -54,17 +53,18 @@ end
 
 local type Uint8Ptr = ffi.Pointer<integer>
 
-local TokenArrayType = ffi.typeof("tl_token_fast[?]")
 local TokenType = ffi.typeof("tl_token_fast")
 
-local record LexBuffer
-   data: TokenPtr
-   count: integer
-   cap: integer
+local record LexerState
    src: string
    src_ptr: Uint8Ptr
+   len: integer
+   pos: integer
+   line: integer
+   col: integer
    file_id: integer
-   lexeme_cache: {string}
+   newline_flag: integer
+   current_token: TokenC
 end
 
 -- Character Properties Lookup Table (FFI)
@@ -122,46 +122,38 @@ local keywords: {string:boolean} = {
    ["_Generic"] = true, ["_Noreturn"] = true, ["_Static_assert"] = true, ["_Thread_local"] = true,
 }
 
-local function lex(source: string, file_id: integer): LexBuffer
+local function new_lexer(source: string, file_id: integer): LexerState
    local len = #source
    local ptr = ffi.cast("const uint8_t*", source) as Uint8Ptr
-   local buf_cap = 4096
-   local buf_data = ffi.new(TokenArrayType, buf_cap) as TokenPtr
-   local buf_count = 0
    
-   -- Localize FFI pointers for speed
+   return {
+      src = source,
+      src_ptr = ptr,
+      len = len,
+      pos = 0,
+      line = 1,
+      col = 1,
+      file_id = file_id,
+      newline_flag = 0,
+      current_token = ffi.new(TokenType) as TokenC
+   }
+end
+
+local function next_token(state: LexerState): TokenC
+   local ptr = state.src_ptr
+   local len = state.len
+   local pos = state.pos
+   local line = state.line
+   local col = state.col
+   local newline_flag = state.newline_flag
+   
    local cp = char_props_c
    local pml = punct_max_len_c
    
-   local pos = 0
-   local line = 1
-   local col = 1
-   local start_pos = 0
-   local start_col = 0
-   local newline_flag = 0 -- 0 or TOKEN_FLAG_NEWLINE
-
-   -- Helper to grow buffer
-   local function grow()
-      local new_cap = buf_cap * 2
-      local new_data = ffi.new(TokenArrayType, new_cap) as TokenPtr
-      (ffi.copy as function(any, any, integer))(new_data, buf_data, buf_cap * ffi.sizeof(TokenType))
-      buf_data = new_data
-      buf_cap = new_cap
-   end
-
-   -- Helper to push token
-   local function push(kind: integer, start: integer, stop: integer, l: integer, c: integer, flags: integer)
-      buf_count = buf_count + 1
-      if buf_count >= buf_cap then grow() end
-      local t = buf_data[buf_count]
-      t.kind = kind
-      t.start = start
-      t.stop = stop
-      t.line = l
-      t.col = c
-      t.flags = flags
-   end
-
+   local start_pos = pos
+   local start_col = col
+   local kind = K_UNKNOWN
+   
    while pos < len do
       local c = ptr[pos]
       
@@ -181,11 +173,11 @@ local function lex(source: string, file_id: integer): LexBuffer
             c = ptr[pos]
          until band(cp[c], PROP_SPACE) == 0
          if pos >= len then break end
+         
+         start_pos = pos
+         start_col = col
       end
 
-      start_pos = pos
-      start_col = col
-      
       -- Identifier / Keyword
       if band(cp[c], PROP_ALPHA) ~= 0 or c == 95 then -- _
          repeat
@@ -196,10 +188,8 @@ local function lex(source: string, file_id: integer): LexBuffer
          until band(cp[c], PROP_IDENT) == 0
          
          local s = ffi.string(ptr + start_pos, pos - start_pos)
-         local kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
-         
-         push(kind, start_pos, pos, line, start_col, newline_flag)
-         newline_flag = 0
+         kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
+         goto found
          
       -- Number
       elseif band(cp[c], PROP_DIGIT) ~= 0 then
@@ -211,7 +201,7 @@ local function lex(source: string, file_id: integer): LexBuffer
             c = ptr[pos]
          until band(cp[c], PROP_IDENT) == 0 and c ~= 46 and c ~= 43 and c ~= 45
          
-         -- Re-scan for correctness
+         -- Re-scan for correctness (full logic)
          pos = start_pos
          col = start_col
          c = ptr[pos]
@@ -277,13 +267,13 @@ local function lex(source: string, file_id: integer): LexBuffer
             end
          end
          
-         push(K_NUMBER, start_pos, pos, line, start_col, newline_flag)
-         newline_flag = 0
+         kind = K_NUMBER
+         goto found
 
       -- String / Char
       elseif c == 34 or c == 39 or (c == 76 and pos + 1 < len and (ptr[pos+1] == 34 or ptr[pos+1] == 39)) then
          local quote = c
-         local kind = K_STRING
+         kind = K_STRING
          if c == 76 then -- L"..."
             pos = pos + 1; col = col + 1
             quote = ptr[pos]
@@ -306,8 +296,7 @@ local function lex(source: string, file_id: integer): LexBuffer
             end
          end
          
-         push(kind, start_pos, pos, line, start_col, newline_flag)
-         newline_flag = 0
+         goto found
 
       -- Comments / Punctuation
       elseif c == 47 then -- /
@@ -320,6 +309,7 @@ local function lex(source: string, file_id: integer): LexBuffer
                pos = pos + 1
             end
             newline_flag = 0 
+            -- Loop back to skip whitespace/newline handling
          elseif next_c == 42 then -- /*
             pos = pos + 2; col = col + 2
             while pos < len do
@@ -336,6 +326,7 @@ local function lex(source: string, file_id: integer): LexBuffer
                pos = pos + 1
             end
             newline_flag = 0 
+            -- Loop back
          else
             -- Punctuation /
             local max_l = pml[c]
@@ -354,8 +345,8 @@ local function lex(source: string, file_id: integer): LexBuffer
                col = col + 1
             end
             
-            push(K_PUNCT, start_pos, pos, line, start_col, newline_flag)
-            newline_flag = 0
+            kind = K_PUNCT
+            goto found
          end
          
       else
@@ -393,37 +384,51 @@ local function lex(source: string, file_id: integer): LexBuffer
             col = col + 1
          end
          
-         push(K_PUNCT, start_pos, pos, line, start_col, newline_flag)
-         newline_flag = 0
+         kind = K_PUNCT
+         goto found
       end
    end
    
-   push(K_EOF, pos, pos, line, col, 0)
+   -- EOF
+   state.pos = pos
+   state.line = line
+   state.col = col
+   state.newline_flag = newline_flag
+   
+   local t = state.current_token
+   t.kind = K_EOF
+   t.start = pos
+   t.stop = pos
+   t.line = line
+   t.col = col
+   t.flags = 0
+   do return t end
 
-   return {
-      data = buf_data,
-      count = buf_count,
-      cap = buf_cap,
-      src = source,
-      src_ptr = ptr,
-      file_id = file_id,
-      lexeme_cache = {},
-   }
+   ::found::
+   state.pos = pos
+   state.line = line
+   state.col = col
+   state.newline_flag = 0 -- Reset after consuming a token
+   
+   local t = state.current_token
+   t.kind = kind
+   t.start = start_pos
+   t.stop = pos
+   t.line = line
+   t.col = start_col
+   t.flags = newline_flag
+   return t
 end
 
-local function lexeme(buf: LexBuffer, idx: integer): string
-   local t = buf.data[idx]
-   local cache = buf.lexeme_cache
-   if not cache[idx] then
-      cache[idx] = ffi.string(buf.src_ptr + t.start, t.stop - t.start)
-   end
-   return cache[idx]
+local function lexeme(state: LexerState, tok: TokenC): string
+   return ffi.string(state.src_ptr + tok.start, tok.stop - tok.start)
 end
 
 return {
-   lex = lex,
+   new_lexer = new_lexer,
+   next_token = next_token,
    lexeme = lexeme,
-   LexBuffer = LexBuffer,
+   LexerState = LexerState,
    TokenKind = TokenKind,
    TokenFlags = TokenFlags,
    K_UNKNOWN = K_UNKNOWN,

@@ -1,7 +1,7 @@
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local Span = require("util.span")
-local Preprocessor = require("pp.preprocessor")
+local Preprocessor = require("pp.preprocessor_fast")
 local Parser = require("parser.parser")
 local Checker = require("sema.checker")
 local token_mod = require("lexer.token")
@@ -19,6 +19,7 @@ end
 local record PipelineOptions
    dump_tokens: boolean
    dump_ast: boolean
+   want_pp_output: boolean
 end
 
 local record FrontendOutput
@@ -45,9 +46,63 @@ local function dump_tokens(tokens: {Token})
    end
 end
 
+local function should_insert_space(prev: Token, cur: Token): boolean
+   if prev.kind == "punctuator" or cur.kind == "punctuator" then
+      return prev.kind == "identifier" and cur.kind == "identifier"
+   end
+   return true
+end
+
+local record WrappedIterator
+   iter: function(): Token
+   tokens: {Token}
+   text: function(): string
+end
+
+local function wrap_iterator(base: function(): Token, capture_tokens: boolean, build_text: boolean): WrappedIterator
+   local tokens: {Token} = {}
+   local parts: {string} = {}
+   local prev: Token | nil = nil
+
+   local function append_text(tok: Token)
+      if not build_text or tok.kind == "eof" then
+         return
+      end
+      if prev and should_insert_space(prev, tok) then
+         parts[#parts + 1] = " "
+      end
+      parts[#parts + 1] = tok.lexeme
+   end
+
+   local function iter(): Token
+      local t = base()
+      if capture_tokens then
+         tokens[#tokens + 1] = t
+      end
+      append_text(t)
+      if t.kind ~= "eof" then
+         prev = t
+      end
+      return t
+   end
+
+   local function text(): string
+      if not build_text then
+         return ""
+      end
+      return table.concat(parts)
+   end
+
+   return {
+      iter = iter,
+      tokens = tokens,
+      text = text,
+   }
+end
+
 local function compile_file(path: string, file_id: integer, opts?: PipelineOptions, reporter?: Reporter): FrontendOutput | nil
    local rep = reporter or Reporter.new()
-   local options = opts or { dump_tokens = false, dump_ast = false }
+   local options = opts or { dump_tokens = false, dump_ast = false, want_pp_output = false }
    rep:track_file(file_id, path)
    local src, read_err = read_file(path)
    if not src then
@@ -64,17 +119,27 @@ local function compile_file(path: string, file_id: integer, opts?: PipelineOptio
       current_dir = dir,
       source_path = path,
    })
-   if options.dump_tokens then
-      dump_tokens(pp.tokens)
+
+   local need_tokens = options.dump_tokens
+   local need_text = options.want_pp_output
+
+   local wrapped = wrap_iterator(pp.iterator, need_tokens, need_text)
+   local iter = wrapped.iter
+
+   local tu: TranslationUnit = Parser.parse(src, file_id, rep, nil, iter)
+
+   local checked = Checker.check(tu, rep)
+   if need_tokens then
+      dump_tokens(wrapped.tokens)
    end
 
-   local tu = Parser.parse(pp.text, file_id, rep, pp.tokens)
-   local checked = Checker.check(tu, rep)
+   local pp_text = need_text and wrapped.text() or ""
+   local tokens_out = need_tokens and wrapped.tokens or {}
    local out: FrontendOutput = {
       path = path,
       tu = tu,
-      tokens = pp.tokens,
-      pp_text = pp.text,
+      tokens = tokens_out,
+      pp_text = pp_text,
       checked = checked,
    }
 

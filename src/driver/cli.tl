@@ -227,7 +227,7 @@ local function run(argv: {string})
 
    local opts = parsed.value
    local rep = Reporter.new()
-   local p_opts = { dump_tokens = opts.dump_tokens, dump_ast = opts.dump_ast }
+   local p_opts = { dump_tokens = opts.dump_tokens, dump_ast = opts.dump_ast, want_pp_output = opts.emit_phase == "pp" }
    for idx, path in ipairs(opts.inputs) do
       local out = pipeline.compile_file(path, idx, p_opts, rep)
       if out then

@@ -1,0 +1,10 @@
+{
+    "name": "LuaJIT",
+    "id": "luajit",
+    "version": "1.0.0",
+    "description": "Provides LuaJIT",
+    "installsAfter": ["ghcr.io/devcontainers/features/common-utils"],
+    "dependsOn": {
+        "ghcr.io/devcontainers-community/features/llvm:3": {},
+    }
+}

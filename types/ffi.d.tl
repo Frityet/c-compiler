@@ -70,7 +70,8 @@ local record ffi
     istype: function(ct: CType | string | CData, v: any): boolean
     errno: function(newerr?: integer): integer
     string: function(ptr: CData, len?: integer): string
-    copy: function<T is CData>(dest: Pointer<T>, src: Pointer<T> | string, size: integer)
+    copy: function<T is CData>(dest: Pointer<T>, src: Pointer<T> | Array<T> | string, size: integer)
+    copy: function<T is CData>(dest: Array<T>, src: Array<T> | string, size: integer)
     fill: function<T is CData>(dest: Pointer<T>, size: integer, value: T)
     abi: function(what: string): boolean
 

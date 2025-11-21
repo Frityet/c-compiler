@@ -3,11 +3,21 @@ local Diagnostic = require("diag.diagnostics")
 local bit = require("bit")
 local Reporter = require("diag.reporter")
 local token_mod = require("lexer.token")
-local LexerFFI = require("lexer.lexer_fast")
+local LexerFast = require("lexer.lexer_fast")
 
 local TokenRecord = token_mod.Token
 local type Token = token_mod.Token
 local type TokenKindType = token_mod.TokenKind
+local type LexerState = LexerFast.LexerState
+
+local record TokenC
+   start: integer
+   stop: integer
+   line: integer
+   col: integer
+   kind: integer
+   flags: integer
+end
 
 local band = bit.band
 
@@ -19,14 +29,14 @@ local TK_KEYWORD: TokenKindType = "keyword"
 local TK_PUNCT: TokenKindType = "punctuator"
 local TK_EOF: TokenKindType = "eof"
 
-local K_IDENTIFIER = LexerFFI.K_IDENTIFIER
-local K_NUMBER = LexerFFI.K_NUMBER
-local K_STRING = LexerFFI.K_STRING
-local K_CHAR = LexerFFI.K_CHAR
-local K_KEYWORD = LexerFFI.K_KEYWORD
-local K_PUNCT = LexerFFI.K_PUNCT
-local K_EOF = LexerFFI.K_EOF
-local TOKEN_FLAG_NEWLINE = LexerFFI.TOKEN_FLAG_NEWLINE
+local K_IDENTIFIER = LexerFast.K_IDENTIFIER
+local K_NUMBER = LexerFast.K_NUMBER
+local K_STRING = LexerFast.K_STRING
+local K_CHAR = LexerFast.K_CHAR
+local K_KEYWORD = LexerFast.K_KEYWORD
+local K_PUNCT = LexerFast.K_PUNCT
+local K_EOF = LexerFast.K_EOF
+local TOKEN_FLAG_NEWLINE = LexerFast.TOKEN_FLAG_NEWLINE
 
 local empty_tbl = {}
 
@@ -46,9 +56,8 @@ local record PreprocessFastResult
    text: string
    tokens: {Token}
    file_id: integer
+   iterator: function(): Token
 end
-
-local type LexBuffer = LexerFFI.LexBuffer
 
 local record Macro
    name: string
@@ -96,12 +105,15 @@ local function token_kind_string(kind_id: integer): string
    return TK_EOF
 end
 
-local function make_token(buf: LexBuffer, idx: integer): Token
-   local t = buf.data[idx]
-   local kind = token_kind_string(t.kind) as token_mod.TokenKind
-   local lx = LexerFFI.lexeme(buf, idx)
-   local span = Span.new(buf.file_id, t.start + 1, t.stop + 1, t.line, t.col)
-   return TokenRecord.new(kind, lx, span, empty_tbl, empty_tbl, band(t.flags, TOKEN_FLAG_NEWLINE) ~= 0)
+local function lexeme_from_token(lexer: LexerState, tc: TokenC): string
+   return string.sub(lexer.src, tc.start + 1, tc.stop)
+end
+
+local function make_token(lexer: LexerState, tc: TokenC): Token
+   local kind = token_kind_string(tc.kind) as token_mod.TokenKind
+   local lx = lexeme_from_token(lexer, tc)
+   local span = Span.new(lexer.file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
+   return TokenRecord.new(kind, lx, span, empty_tbl, empty_tbl, band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0)
 end
 
 local function replace_trigraphs(src: string): string
@@ -131,6 +143,20 @@ local function splice_lines(src: string, rep: Reporter, file_id: integer): strin
       rep:report(Diagnostic.new("note", string.format("removed %d line splice(s)", removed), span, "PP001"))
    end
    return spliced
+end
+
+local function lex_tokens(src: string, file_id: integer): {Token}
+   local lexer = LexerFast.new_lexer(src, file_id)
+   local tokens: {Token} = {}
+   while true do
+      local tc = LexerFast.next_token(lexer) as TokenC
+      local tok = make_token(lexer, tc)
+      tokens[#tokens + 1] = tok
+      if tok.kind == TK_EOF then
+         break
+      end
+   end
+   return tokens
 end
 
 local function text_from_tokens(tokens: {Token}): string
@@ -284,15 +310,7 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
    if config.defines then
       local defs = config.defines as {string:string}
       for name, body in pairs(defs) do
-         local lb = LexerFFI.lex(body, file_id)
-         local toks: {Token} = {}
-         for i = 1, lb.count do
-            local t = make_token(lb, i)
-            toks[i] = t
-            if t.kind == TK_EOF then
-               break
-            end
-         end
+         local toks = lex_tokens(body, file_id)
          define_object_macro(st, name, toks)
       end
    end
@@ -325,15 +343,12 @@ local function stringize(argument_tokens: {Token}, span: Span): Token
 end
 
 local function lex_single_token(src: string, file_id: integer): Token | nil
-   local lb = LexerFFI.lex(src, file_id)
-   if lb.count == 0 then
+   local lexer = LexerFast.new_lexer(src, file_id)
+   local tc = LexerFast.next_token(lexer) as TokenC
+   if tc.kind == K_EOF then
       return nil
    end
-   local t = lb.data[1]
-   if t.kind == K_EOF then
-      return nil
-   end
-   return make_token(lb, 1)
+   return make_token(lexer, tc)
 end
 
 local function token_paste(lhs: Token | nil, rhs: Token | nil, file_id: integer): {Token}
@@ -908,26 +923,7 @@ local function parse_include_target(tokens: {Token}, raw_source: string): string
    return nil, false
 end
 
-local function collect_line_from_buffer(buf: LexBuffer, start_idx: integer): {Token}, integer
-   local line: {Token} = {}
-   local idx = start_idx
-   local t_start = buf.data[start_idx]
-   local line_no = t_start.line
-   while idx <= buf.count do
-      local t = buf.data[idx]
-      if #line > 0 and t.line > line_no then
-         break
-      end
-      line[#line + 1] = make_token(buf, idx)
-      idx = idx + 1
-      if t.kind == K_EOF then
-         break
-      end
-   end
-   return line, idx
-end
-
-local function preprocess_inner(source: string, file_id: integer, reporter: Reporter, config: FastConfig, state: State, current_path?: string): PreprocessFastResult
+local function preprocess_inner(source: string, file_id: integer, reporter: Reporter, config: FastConfig, state: State, current_path?: string): function(): Token
    local _ = config
    local prev_dir = state.current_dir
    if current_path then
@@ -940,199 +936,275 @@ local function preprocess_inner(source: string, file_id: integer, reporter: Repo
    text = splice_lines(text, reporter, file_id)
    reporter:track_file(file_id, current_path, text)
 
-   local lb = LexerFFI.lex(text, file_id)
-   -- Removed upfront raw_tokens creation
-
-   local out_tokens: {Token} = {}
+   local lexer = LexerFast.new_lexer(text, file_id)
    local cond_stack: {ConditionalState} = {}
+   local pending_tokens: {Token} = {}
+   local pending_idx = 1
+   local include_stack: {function(): Token} = {}
+   local eof_returned = false
 
-   local idx = 1
-   while idx <= lb.count do
-      local t_ptr = lb.data[idx]
-      local at_line_start = (idx == 1) or t_ptr.line > lb.data[idx - 1].line
-      local skip_active = (#cond_stack > 0 and cond_stack[#cond_stack].skipping) or false
+   local function next_raw(): Token
+      local tc = LexerFast.next_token(lexer) as TokenC
+      local kind_str = token_kind_string(tc.kind) as token_mod.TokenKind
+      local lx = lexeme_from_token(lexer, tc)
+      local span = Span.new(file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
+      return TokenRecord.new(kind_str, lx, span, empty_tbl, empty_tbl, band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0)
+   end
+
+   local lookahead: Token | nil = nil
+   local function peek_raw(): Token
+      if not lookahead then
+         lookahead = next_raw()
+      end
+      return lookahead
+   end
+
+   local function consume_raw(): Token
+      local t = peek_raw()
+      lookahead = nil
+      return t
+   end
+
+   -- Forward declaration
+   local next_token: function(): Token
+
+   local function handle_directive(directive: Token, line_tokens: {Token})
+      local name = directive.lexeme
+      local body = {}
+      for i = 2, #line_tokens do
+         body[#body + 1] = line_tokens[i]
+      end
       
-      if t_ptr.kind == K_EOF then
-         out_tokens[#out_tokens + 1] = make_token(lb, idx)
-         break
+      local parent_skip = false
+      for i = 1, #cond_stack do
+         if cond_stack[i].skipping then
+            parent_skip = true
+            break
+         end
       end
 
-      if skip_active and not (at_line_start and t_ptr.kind == K_PUNCT and LexerFFI.lexeme(lb, idx) == "#") then
-         idx = idx + 1
-      elseif at_line_start and t_ptr.kind == K_PUNCT and LexerFFI.lexeme(lb, idx) == "#" then
-         local line_tokens, next_idx = collect_line_from_buffer(lb, idx)
-         idx = next_idx
-         table.remove(line_tokens, 1)
-         local directive = line_tokens[1]
-         if directive and (directive.kind == TK_IDENTIFIER or directive.kind == TK_KEYWORD) then
-            local name = directive.lexeme
-            local body = {}
-            for i = 2, #line_tokens do
-               body[#body + 1] = line_tokens[i]
-            end
-            local parent_skip = skip_active
-
-            if name == "define" and not parent_skip then
-               parse_define(body, state)
-            elseif name == "undef" and not parent_skip then
-               if body[1] and body[1].kind == TK_IDENTIFIER then
-                  state.macros[body[1].lexeme] = nil
-               end
-            elseif name == "ifdef" or name == "ifndef" then
-               local should_skip = false
-               if #body > 0 and body[1].kind == TK_IDENTIFIER then
-                  local present = state.macros[body[1].lexeme] ~= nil
-                  should_skip = name == "ifdef" and not present or name == "ifndef" and present
-               else
-                  should_skip = true
-               end
-               local taken = not should_skip and not parent_skip
-               local effective_skip = parent_skip or should_skip
-               cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
-            elseif name == "if" then
-               local cond = false
-               if not parent_skip then
-                  cond = parse_if_expr(body, state)
-               end
-               local effective_skip = parent_skip or not cond
-               local taken = cond and not parent_skip
-               cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
-            elseif name == "elif" then
-               if #cond_stack == 0 then
-                  reporter:report(Diagnostic.new("error", "#elif without #if", directive.span, "PP100"))
-               else
-                  local top = cond_stack[#cond_stack]
-                  if top.in_else then
-                     reporter:report(Diagnostic.new("error", "#elif after #else", directive.span, "PP101"))
-                  else
-                     local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
-                     if not top.branch_taken and not outer_skip then
-                        local cond = parse_if_expr(body, state)
-                        top.skipping = not cond
-                        top.branch_taken = cond
-                     else
-                        top.skipping = true
-                     end
-                     cond_stack[#cond_stack] = top
-                  end
-               end
-            elseif name == "else" then
-               if #cond_stack == 0 then
-                  reporter:report(Diagnostic.new("error", "#else without #if", directive.span, "PP102"))
-               else
-                  local top = cond_stack[#cond_stack]
-                  if top.in_else then
-                     reporter:report(Diagnostic.new("error", "duplicate #else", directive.span, "PP103"))
-                  else
-                     top.in_else = true
-                     local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
-                     if top.branch_taken or outer_skip then
-                        top.skipping = true
-                     else
-                        top.skipping = false
-                        top.branch_taken = true
-                     end
-                     cond_stack[#cond_stack] = top
-                  end
-               end
-            elseif name == "endif" then
-               if #cond_stack == 0 then
-                  reporter:report(Diagnostic.new("error", "#endif without #if", directive.span, "PP104"))
-               else
-                  cond_stack[#cond_stack] = nil
-               end
-            elseif name == "include" and not parent_skip then
-               local target, is_system = parse_include_target(body, text)
-               if target then
-                  local resolved = find_include(target, state, is_system)
-                  if not resolved then
-                     reporter:report(Diagnostic.new("error", "include not found: " .. target, directive.span, "PP200"))
-                  elseif state.pragma_once[resolved] then
-                  else
-                     local data, err = read_file(resolved)
-                     if not data then
-                        reporter:report(Diagnostic.new("error", "failed to read include: " .. tostring(err), directive.span, "PP201"))
-                     else
-                        local include_result = preprocess_inner(data, state.next_file_id, reporter, {
-                           search_paths = state.search_paths,
-                           defines = {},
-                           undefs = {},
-                           current_dir = state.current_dir,
-                           source_path = resolved,
-                        }, state, resolved)
-                        state.next_file_id = state.next_file_id + 1
-                        for _, itok in ipairs(include_result.tokens) do
-                           if itok.kind ~= TK_EOF then
-                              out_tokens[#out_tokens + 1] = itok
-                           end
-                        end
-                     end
-                  end
-               end
-            elseif name == "pragma" then
-               if not parent_skip and body[1] and body[1].kind == TK_IDENTIFIER and body[1].lexeme == "once" then
-                  if current_path then
-                     state.pragma_once[current_path] = true
-                  end
-               end
-            elseif name == "line" and not parent_skip then
-               if #body >= 1 and body[1].kind == TK_NUMBER then
-                  local desired = tonumber(body[1].lexeme)
-                  if desired then
-                     local current_line = directive.span.line
-                     state.file_line_adjust[file_id] = math.floor(desired) - (current_line + 1)
-                     if body[2] and body[2].kind == TK_STRING then
-                        local fname = body[2].lexeme:gsub('^"', ""):gsub('"$', "")
-                        state.file_name_override[file_id] = fname
-                     end
-                  end
-               end
-            elseif name == "error" then
-               if not parent_skip then
-                  local msg_parts: {string} = {}
-                  for _, bt in ipairs(body) do
-                     msg_parts[#msg_parts + 1] = bt.lexeme
-                  end
-                  reporter:report(Diagnostic.new("error", "#error " .. table.concat(msg_parts, " "), directive.span, "PP300"))
-               end
-            elseif name == "warning" then
-               if not parent_skip then
-                  local msg_parts: {string} = {}
-                  for _, bt in ipairs(body) do
-                     msg_parts[#msg_parts + 1] = bt.lexeme
-                  end
-                  reporter:report(Diagnostic.new("warning", "#warning " .. table.concat(msg_parts, " "), directive.span, "PP301"))
-               end
+      if name == "define" and not parent_skip then
+         parse_define(body, state)
+      elseif name == "undef" and not parent_skip then
+         if body[1] and body[1].kind == TK_IDENTIFIER then
+            state.macros[body[1].lexeme] = nil
+         end
+      elseif name == "ifdef" or name == "ifndef" then
+         local should_skip = false
+         if #body > 0 and body[1].kind == TK_IDENTIFIER then
+            local present = state.macros[body[1].lexeme] ~= nil
+            should_skip = name == "ifdef" and not present or name == "ifndef" and present
+         else
+            should_skip = true
+         end
+         local taken = not should_skip and not parent_skip
+         local effective_skip = parent_skip or should_skip
+         cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
+      elseif name == "if" then
+         local cond = false
+         if not parent_skip then
+            cond = parse_if_expr(body, state)
+         end
+         local effective_skip = parent_skip or not cond
+         local taken = cond and not parent_skip
+         cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
+      elseif name == "elif" then
+         if #cond_stack == 0 then
+            reporter:report(Diagnostic.new("error", "#elif without #if", directive.span, "PP100"))
+         else
+            local top = cond_stack[#cond_stack]
+            if top.in_else then
+               reporter:report(Diagnostic.new("error", "#elif after #else", directive.span, "PP101"))
             else
+               local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
+               if not top.branch_taken and not outer_skip then
+                  local cond = parse_if_expr(body, state)
+                  top.skipping = not cond
+                  top.branch_taken = cond
+               else
+                  top.skipping = true
+               end
+               cond_stack[#cond_stack] = top
             end
          end
+      elseif name == "else" then
+         if #cond_stack == 0 then
+            reporter:report(Diagnostic.new("error", "#else without #if", directive.span, "PP102"))
+         else
+            local top = cond_stack[#cond_stack]
+            if top.in_else then
+               reporter:report(Diagnostic.new("error", "duplicate #else", directive.span, "PP103"))
+            else
+               top.in_else = true
+               local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
+               if top.branch_taken or outer_skip then
+                  top.skipping = true
+               else
+                  top.skipping = false
+                  top.branch_taken = true
+               end
+               cond_stack[#cond_stack] = top
+            end
+         end
+      elseif name == "endif" then
+         if #cond_stack == 0 then
+            reporter:report(Diagnostic.new("error", "#endif without #if", directive.span, "PP104"))
+         else
+            cond_stack[#cond_stack] = nil
+         end
+      elseif name == "include" and not parent_skip then
+         local target, is_system = parse_include_target(body, text)
+         if target then
+            local resolved = find_include(target, state, is_system)
+            if not resolved then
+               reporter:report(Diagnostic.new("error", "include not found: " .. target, directive.span, "PP200"))
+            elseif state.pragma_once[resolved] then
+               -- skip
+            else
+               local data, err = read_file(resolved)
+               if not data then
+                  reporter:report(Diagnostic.new("error", "failed to read include: " .. tostring(err), directive.span, "PP201"))
+               else
+                  local inc_iter = preprocess_inner(data, state.next_file_id, reporter, config, state, resolved)
+                  state.next_file_id = state.next_file_id + 1
+                  include_stack[#include_stack + 1] = inc_iter
+               end
+            end
+         end
+      elseif name == "pragma" then
+         if not parent_skip and body[1] and body[1].kind == TK_IDENTIFIER and body[1].lexeme == "once" then
+            if current_path then
+               state.pragma_once[current_path] = true
+            end
+         end
+      elseif name == "line" and not parent_skip then
+         if #body >= 1 and body[1].kind == TK_NUMBER then
+            local desired = tonumber(body[1].lexeme)
+            if desired then
+               local current_line = directive.span.line
+               state.file_line_adjust[file_id] = math.floor(desired) - (current_line + 1)
+               if body[2] and body[2].kind == TK_STRING then
+                  local fname = body[2].lexeme:gsub('^"', ""):gsub('"$', "")
+                  state.file_name_override[file_id] = fname
+               end
+            end
+         end
+      elseif name == "error" then
+         if not parent_skip then
+            local msg_parts: {string} = {}
+            for _, bt in ipairs(body) do
+               msg_parts[#msg_parts + 1] = bt.lexeme
+            end
+            reporter:report(Diagnostic.new("error", "#error " .. table.concat(msg_parts, " "), directive.span, "PP300"))
+         end
+      elseif name == "warning" then
+         if not parent_skip then
+            local msg_parts: {string} = {}
+            for _, bt in ipairs(body) do
+               msg_parts[#msg_parts + 1] = bt.lexeme
+            end
+            reporter:report(Diagnostic.new("warning", "#warning " .. table.concat(msg_parts, " "), directive.span, "PP301"))
+         end
+      end
+   end
+
+   next_token = function(): Token
+      -- 1. Serve from include stack
+      while #include_stack > 0 do
+         local inc_iter = include_stack[#include_stack]
+         local t = inc_iter()
+         if t.kind == TK_EOF then
+            include_stack[#include_stack] = nil
+         else
+            return t
+         end
+      end
+
+      -- 2. Serve from pending buffer
+      if pending_idx <= #pending_tokens then
+         local t = pending_tokens[pending_idx]
+         pending_idx = pending_idx + 1
+         return t
+      end
+
+      -- 3. Refill buffer
+      if eof_returned then
+         return TokenRecord.new(TK_EOF, "", Span.new(file_id, #text, #text, 1, 1), empty_tbl, empty_tbl)
+      end
+
+      local raw_chunk: {Token} = {}
+      
+      while true do
+         local t = peek_raw()
+         if t.kind == TK_EOF then
+            consume_raw()
+            if #raw_chunk == 0 then
+               eof_returned = true
+               state.current_dir = prev_dir
+               if #cond_stack > 0 then
+                  reporter:report(Diagnostic.new("error", "unterminated conditional directive", Span.new(file_id, #text, #text, 1, 1), "PP400"))
+               end
+               return TokenRecord.new(TK_EOF, "", Span.new(file_id, #text, #text, 1, 1), empty_tbl, empty_tbl)
+            end
+            break
+         end
+
+         local at_line_start = t.has_newline or (t.span.line == 1 and t.span.column == 1)
+         if at_line_start and t.kind == TK_PUNCT and t.lexeme == "#" then
+            -- If we have accumulated tokens, stop and process them first
+            if #raw_chunk > 0 then
+               break
+            end
+            
+            -- Parse directive line
+            consume_raw() -- eat #
+            local line_tokens: {Token} = {}
+            while true do
+               local lt = peek_raw()
+               if lt.kind == TK_EOF or lt.has_newline then
+                  break
+               end
+               line_tokens[#line_tokens + 1] = consume_raw()
+            end
+            
+            local directive = line_tokens[1]
+            if directive and (directive.kind == TK_IDENTIFIER or directive.kind == TK_KEYWORD) then
+               handle_directive(directive, line_tokens)
+               -- If include was pushed, return from it immediately
+               if #include_stack > 0 then
+                  return next_token()
+               end
+            end
+            -- Continue loop to get more tokens
+         else
+            local skip_active = false
+            if #cond_stack > 0 and cond_stack[#cond_stack].skipping then
+               skip_active = true
+            end
+            
+            if not skip_active then
+               raw_chunk[#raw_chunk + 1] = consume_raw()
+            else
+               consume_raw()
+            end
+         end
+      end
+
+      -- Expand macros in the chunk
+      pending_tokens = expand_macros(raw_chunk, state)
+      pending_idx = 1
+      
+      if #pending_tokens > 0 then
+         local t = pending_tokens[pending_idx]
+         pending_idx = pending_idx + 1
+         return t
       else
-         out_tokens[#out_tokens + 1] = make_token(lb, idx)
-         idx = idx + 1
+         -- Recurse if expansion resulted in empty (e.g. empty macro)
+         return next_token()
       end
    end
 
-   local expanded = expand_macros(out_tokens, state)
-   local final_tokens: {Token} = {}
-   local has_eof = false
-   for _, t in ipairs(expanded) do
-      final_tokens[#final_tokens + 1] = t
-      if t.kind == TK_EOF then
-         has_eof = true
-      end
-   end
-   if not has_eof then
-      final_tokens[#final_tokens + 1] = TokenRecord.new(TK_EOF, "", Span.new(file_id, #text, #text, 1, 1), empty_tbl, empty_tbl)
-   end
-
-   local final_text = text_from_tokens(final_tokens)
-   state.current_dir = prev_dir
-
-   if #cond_stack > 0 then
-      reporter:report(Diagnostic.new("error", "unterminated conditional directive", Span.new(file_id, #text, #text, 1, 1), "PP400"))
-   end
-
-   return { text = final_text, tokens = final_tokens, file_id = file_id }
+   return next_token
 end
 
 local function preprocess_fast(source: string, file_id: integer, reporter?: Reporter, config?: FastConfig): PreprocessFastResult
@@ -1150,7 +1222,13 @@ local function preprocess_fast(source: string, file_id: integer, reporter?: Repo
       no_system_paths = base_cfg.no_system_paths,
    }
    local state = make_state(rep, cfg, file_id)
-   return preprocess_inner(source, file_id, rep, cfg, state, cfg.source_path)
+   local iter = preprocess_inner(source, file_id, rep, cfg, state, cfg.source_path)
+   return {
+      text = "",
+      tokens = {},
+      file_id = file_id,
+      iterator = iter,
+   }
 end
 
 return {
