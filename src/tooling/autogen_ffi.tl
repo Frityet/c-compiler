@@ -1044,7 +1044,7 @@ local function generate(opts: GenerateOptions, reporter?: Reporter, writer?: fun
    for idx, path in ipairs(opts.headers) do
       local pp = Preprocessor.preprocess_file(path, idx, rep, {
          search_paths = { path_dir(path) },
-         defines = Target.default_defines(HOST_TARGET),
+         defines = Target.default_defines(HOST_TARGET, true),
          undefs = {},
          current_dir = path_dir(path),
          source_path = path,

@@ -70,6 +70,7 @@ local record FastConfig
    current_dir: string | nil
    source_path: string | nil
    no_system_paths: boolean | nil
+   strict_c99: boolean | nil
 end
 
 local function new_token(kind: TokenKindType, lexeme: string, span: Span, has_newline: boolean): Token
@@ -254,7 +255,42 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
       file_name_override = {},
    }
 
-   add_builtin_macros(st, file_id, Target.default_defines(target))
+   local want_extensions = not (config.strict_c99 or false)
+   local function tokens_from_body(body: string): {Token}
+      local toks = lex_tokens(body, file_id)
+      if #toks > 0 and toks[#toks].kind == TK_EOF then
+         toks[#toks] = nil
+      end
+      return toks
+   end
+
+   add_builtin_macros(st, file_id, Target.default_defines(target, want_extensions))
+
+   local function def_obj(name: string, body: string)
+      define_object_macro(st, name, tokens_from_body(body))
+   end
+
+   def_obj("__restrict", "restrict")
+   def_obj("__restrict__", "restrict")
+   def_obj("__extension__", "")
+   def_obj("__inline", "inline")
+   def_obj("__inline__", "inline")
+   def_obj("__asm", "")
+   def_obj("__asm__", "")
+   def_obj("__volatile", "volatile")
+   def_obj("__volatile__", "volatile")
+   def_obj("__signed__", "signed")
+   def_obj("__const__", "const")
+   def_obj("__THROW", "")
+   def_obj("__THROWNL", "")
+   def_obj("__wur", "")
+   def_obj("__attribute_deprecated__", "")
+   def_obj("__NTH", "")
+   def_obj("__builtin_va_list", "void *")
+   def_obj("__gnuc_va_list", "__builtin_va_list")
+
+   define_function_macro(st, "__builtin_expect", { "x", "y" }, false, tokens_from_body("(x)"))
+   define_function_macro(st, "__builtin_constant_p", { "x" }, false, tokens_from_body("0"))
 
    if config.defines then
       local defs = config.defines as {string:string}

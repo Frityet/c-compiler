@@ -128,30 +128,12 @@ local function default_include_paths(info: TargetInfo): {string}
    return paths
 end
 
-local function default_defines(info: TargetInfo): {string:string}
+local function default_defines(info: TargetInfo, include_extensions: boolean): {string:string}
    local defs: {string:string} = {
       __STDC__ = "1",
       __STDC_VERSION__ = "199901L",
       __STDC_HOSTED__ = "1",
    }
-
-   local gnu_major = info.is_macos and "4" or "12"
-   local gnu_minor = info.is_macos and "2" or "0"
-   local gnu_patch = info.is_macos and "1" or "0"
-   defs["__GNUC__"] = gnu_major
-   defs["__GNUC_MINOR__"] = gnu_minor
-   defs["__GNUC_PATCHLEVEL__"] = gnu_patch
-   defs["__GNUG__"] = gnu_major
-
-   local cc = os.getenv("CC")
-   local prefers_clang = info.is_macos or (cc is string and cc:match("clang") ~= nil)
-   if prefers_clang then
-      defs["__clang__"] = "1"
-      defs["__clang_major__"] = "14"
-      defs["__clang_minor__"] = "0"
-      defs["__clang_patchlevel__"] = "3"
-      defs["__llvm__"] = "1"
-   end
 
    if info.is_posix then
       defs["__unix__"] = "1"
@@ -183,6 +165,26 @@ local function default_defines(info: TargetInfo): {string:string}
       defs["__aarch64__"] = "1"
    elseif info.arch == "arm" then
       defs["__arm__"] = "1"
+   end
+
+    if include_extensions then
+      local gnu_major = info.is_macos and "4" or "12"
+      local gnu_minor = info.is_macos and "2" or "0"
+      local gnu_patch = info.is_macos and "1" or "0"
+      defs["__GNUC__"] = gnu_major
+      defs["__GNUC_MINOR__"] = gnu_minor
+      defs["__GNUC_PATCHLEVEL__"] = gnu_patch
+      defs["__GNUG__"] = gnu_major
+
+      local cc = os.getenv("CC")
+      local prefers_clang = info.is_macos or (cc is string and cc:match("clang") ~= nil)
+      if prefers_clang then
+         defs["__clang__"] = "1"
+         defs["__clang_major__"] = "14"
+         defs["__clang_minor__"] = "0"
+         defs["__clang_patchlevel__"] = "3"
+         defs["__llvm__"] = "1"
+      end
    end
 
    return defs
