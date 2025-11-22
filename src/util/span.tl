@@ -8,8 +8,7 @@ local record Span
    metamethod __tostring: function(Span): string
 end
 
-local span_mt: metatable<Span>
-span_mt = {
+local span_mt: metatable<Span> = {
    __index = Span,
    __tostring = function(self: Span): string
       local width = self.end_offset - self.start_offset

@@ -154,8 +154,8 @@ local record TokenView
    lexeme: string
 end
 
-local record LiteralExprView
-   token: TokenView | nil
+local record LiteralExprView is ExpressionRef where self.token
+   token: TokenView
 end
 
 local function qualifier_set_equal(lhs: {TypeQualifier}, rhs: {TypeQualifier}): boolean
@@ -214,19 +214,8 @@ local function enum_values_equal(lhs: {EnumConst}, rhs: {EnumConst}): boolean
 end
 
 local function extract_literal(expr: ExpressionRef | nil): string | nil
-   if expr is nil then
-      return nil
-   end
-   local expr_any: LiteralExprView = expr as LiteralExprView
-   local token = expr_any.token
-   if token is nil then
-      return nil
-   end
-   local lex = token.lexeme
-   if type(lex) == "string" then
-      return lex
-   end
-   return nil
+   if expr is nil or not expr is LiteralExprView then return nil end
+   return expr.token.lexeme
 end
 
 types_equal = function(lhs: TypeNode, rhs: TypeNode): boolean
@@ -240,7 +229,7 @@ types_equal = function(lhs: TypeNode, rhs: TypeNode): boolean
    elseif lhs is ArrayType and rhs is ArrayType then
       local lhs_size = lhs.size
       local rhs_size = rhs.size
-      if not (lhs_size is nil) or not (rhs_size is nil) then
+      if not lhs_size is nil or not rhs_size is nil then
          if lhs_size ~= rhs_size then
             return false
          end
