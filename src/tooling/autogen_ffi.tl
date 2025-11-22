@@ -4,6 +4,7 @@ local Checker = require("sema.checker")
 local Reporter = require("diag.reporter")
 local LexerFast = require("lexer.lexer")
 local Target = require("util.target")
+local Diagnostic = require("diag.diagnostics")
 local types = require("sema.types")
 local ast = require("parser.ast")
 
@@ -23,6 +24,7 @@ local record GenerateOptions
    lib_name: string | nil
    ignore_system_includes: boolean | nil
    max_errors: integer | nil
+   diagnostic_level: Diagnostic.Severity
    load_library: string | nil
    strip_prefix: string | nil
 end

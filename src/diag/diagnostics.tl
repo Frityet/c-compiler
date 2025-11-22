@@ -1,13 +1,12 @@
 local Span = require("util.span")
 
-local enum DiagnosticSeverity
-   "error"
-   "warning"
-   "note"
-end
-
 local record Diagnostic
-   severity: DiagnosticSeverity
+   enum Severity
+      "error"
+      "warning"
+      "note"
+   end
+   severity: Severity
    message: string
    span: Span
    code: string
@@ -26,7 +25,7 @@ diag_mt = {
 }
 
 function Diagnostic.new(
-   severity: DiagnosticSeverity,
+   severity: Diagnostic.Severity,
    message: string,
    span: Span,
    code: string,

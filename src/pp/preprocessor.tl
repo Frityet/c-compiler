@@ -115,6 +115,7 @@ local function splice_lines(src: string, rep: Reporter, file_id: integer): strin
    return spliced
 end
 
+
 local function lex_tokens(src: string, file_id: integer): {Token}
    local lexer = LexerFast.new_lexer(src, file_id)
    local tokens: {Token} = {}

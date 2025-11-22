@@ -1,5 +1,6 @@
 local Span = require("util.span")
 local Diagnostic = require("diag.diagnostics")
+local type List = require("util.list")
 
 local record FileContext
    path: string | nil
@@ -219,11 +220,15 @@ function Reporter:format(diag: Diagnostic): string
    return table.concat(lines, "\n")
 end
 
-function Reporter:print_all(max_errors?: integer)
+function Reporter:print_all(max_errors?: integer, severity_levels?: {Diagnostic.Severity:boolean})
    local counts = { error = 0, warning = 0, note = 0 }
    local limit = max_errors
    if limit is nil or limit <= 0 then
       limit = #self.diagnostics
+   end
+
+   if severity_levels then
+      self.diagnostics = (self.diagnostics as List<Diagnostic>):where(function(d: Diagnostic): boolean return severity_levels[d.severity] end)
    end
 
    for idx, d in ipairs(self.diagnostics) do

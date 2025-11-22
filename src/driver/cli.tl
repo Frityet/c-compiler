@@ -1,5 +1,6 @@
 local Result = require("util.result")
 local Reporter = require("diag.reporter")
+local Diagnostic = require("diag.diagnostics")
 local pipeline = require("driver.pipeline")
 local AutogenFFI = require("tooling.autogen_ffi")
 local type FrontendOutput = pipeline.FrontendOutput
@@ -13,19 +14,21 @@ local record Options
    max_errors: integer | nil
    strip_prefix: string | nil
    load_library: string | nil
+   diagnostic_level: Diagnostic.Severity
 end
 
 local function usage(): string
    return table.concat({
       "cc [options] file.c ...",
       "cc ffi-gen [options] header.h ...",
-      "  -c              Compile only, emit object (not yet implemented)",
-      "  -E              Preprocess only (not yet implemented)",
-      "  -S              Emit assembly (not yet implemented)",
-      "  -o <file>       Output file",
-      "  --dump-tokens   Dump tokens after preprocessing",
-      "  --dump-ast      Dump parsed AST (summary)",
-      "  --max-errors <n>  Limit number of diagnostics printed",
+      "  -c                                        Compile only, emit object (not yet implemented)",
+      "  -E                                        Preprocess only (not yet implemented)",
+      "  -S                                        Emit assembly (not yet implemented)",
+      "  -o <file>                                 Output file",
+      "  --dump-tokens                             Dump tokens after preprocessing",
+      "  --dump-ast                                Dump parsed AST (summary)",
+      "  --max-errors <n>                          Limit number of diagnostics printed",
+      "  --diagnostic-level <note|warning|error>   Level of diagnostics to print. Default: warning",
       "ffi-gen options:",
       "  -o <file>       Output .tl file name (default: <first header>.ffi.tl)",
       "  --lib <name>    Pass to ffi.load; default uses ffi.C",
@@ -49,6 +52,7 @@ local function parse_args(argv: {string}): ParseResult
       max_errors = nil,
       strip_prefix = nil,
       load_library = nil,
+      diagnostic_level = "warning"
    }
 
    local i = 1
@@ -76,6 +80,10 @@ local function parse_args(argv: {string}): ParseResult
          end
          opts.max_errors = math.floor(n)
          i = i + 1
+      elseif argi == "--diagnostic-level" then
+         if i + 1 > #argv then return Result.err("missing level following --diagnostic-level") end
+         local s = argv[i+1]
+         if s == "note" or s == "error" then opts.diagnostic_level = s end
       elseif argi == "--load-library" then
          if i + 1 > #argv then
             return Result.err("missing name following --load-library")
@@ -209,7 +217,15 @@ local function run(argv: {string})
          return error(err)
       end
       if rep:has_errors() then
-         rep:print_all(ffi_opts.max_errors)
+         local t: {Diagnostic.Severity:boolean} = { error = true }
+         if ffi_opts.diagnostic_level ~= "error" then
+            t.warning = true
+            if ffi_opts.diagnostic_level ~= "warning" then
+               t.note = true
+            end
+         end
+         
+         rep:print_all(ffi_opts.max_errors, t)
          return
       end
       print(string.format("cc ffi-gen: wrote %s", ffi_opts.output or "<auto>"))
@@ -238,7 +254,15 @@ local function run(argv: {string})
       end
    end
    if rep:has_errors() then
-      rep:print_all(opts.max_errors)
+      local t: {Diagnostic.Severity:boolean} = { error = true }
+      if opts.diagnostic_level ~= "error" then
+         t.warning = true
+         if opts.diagnostic_level ~= "warning" then
+            t.note = true
+         end
+      end
+      
+      rep:print_all(opts.max_errors, t)
       return
    end
    print(string.format("cc: processed %d input(s) phase=%s output=%s",

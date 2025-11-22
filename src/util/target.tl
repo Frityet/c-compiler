@@ -9,20 +9,27 @@ local record TargetInfo
    is_macos: boolean
    is_windows: boolean
    is_bsd: boolean
-   multiarch: string | nil
+
+   enum MultiArch
+      "x86_64-linux-gnu"
+      "i386-linux-gnu"
+      "aarch64-linux-gnu"
+      "arm-linux-gnueabihf"
+   end
+   multiarch: MultiArch | nil
 end
 
-local CLANG_VERSIONS: {string} = {
+local CLANG_VERSIONS = {
    "20", "19", "18", "17", "16", "15", "14", "13", "12", "11", "10",
 }
 
-local GCC_VERSIONS: {string} = { "13", "12", "11", "10", "9" }
+local GCC_VERSIONS = { "13", "12", "11", "10", "9" }
 
 local function detect(): TargetInfo
-   local osname = tostring(ffi.os)
-   local arch = tostring(ffi.arch)
+   local osname = ffi.os
+   local arch = ffi.arch
    local is_64 = arch == "x64" or arch == "arm64" or arch == "mips64" or arch == "mips64el" or arch == "s390x"
-   local multiarch: string | nil = nil
+   local multiarch: TargetInfo.MultiArch | nil = nil
    if osname == "Linux" then
       if arch == "x64" then
          multiarch = "x86_64-linux-gnu"
@@ -104,7 +111,7 @@ local function default_include_paths(info: TargetInfo): {string}
 
    if info.is_linux then
       if info.multiarch then
-         add("/usr/include/" .. info.multiarch)
+         add("/usr/include/"..tostring(info.multiarch))
          for _, ver in ipairs(GCC_VERSIONS) do
             add(string.format("/usr/lib/gcc/%s/%s/include", info.multiarch, ver))
             add(string.format("/usr/lib/gcc/%s/%s/include-fixed", info.multiarch, ver))
