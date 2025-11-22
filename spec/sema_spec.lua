@@ -143,6 +143,11 @@ describe("sema checker", function()
       assert.are.equal("SEM028", rep.diagnostics[1].code)
    end)
 
+   it("allows string literals to bind to pointer parameters in calls", function()
+      local _, rep = run_check([[int printf(const char *fmt, ...); int main() { printf("%d", 1); }]])
+      assert.are.equal(0, #rep.diagnostics)
+   end)
+
    it("requires labels to be declared before use", function()
       local _, rep = run_check("void f() { goto missing; }")
       assert.are.equal(1, #rep.diagnostics)

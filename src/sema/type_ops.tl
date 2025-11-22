@@ -108,10 +108,10 @@ local function make_builtin(name: types.BuiltinName, span: Span, is_signed?: boo
 end
 
 local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boolean}): types.TypeNode
+   local guard = seen or {}
    local base, quals = strip_qualifiers(ty)
    if base is types.TypedefType then
       local name = base.name
-      local guard = seen or {}
       if guard[name] then
          return wrap_qualified(base, quals)
       end
@@ -126,7 +126,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       ctx.rep:report(Diagnostic.new("error", string.format("unknown type name '%s'", name), base.span, "SEM020"))
       return wrap_qualified(make_builtin("int", base.span, true), quals)
    elseif base is types.PointerType then
-      local inner = resolve_type(ctx, base.to, seen)
+      local inner = resolve_type(ctx, base.to, guard)
       local ptr: types.TypeNode = {
          tag = "pointer",
          span = base.span,
@@ -135,7 +135,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       }
       return wrap_qualified(ptr, quals)
    elseif base is types.ArrayType then
-      local inner = resolve_type(ctx, base.of, seen)
+      local inner = resolve_type(ctx, base.of, guard)
       local size = base.size
       if size is nil then
          local sz_expr = base.size_expr
@@ -172,6 +172,13 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       }
       return wrap_qualified(fn, quals)
    elseif base is types.StructType then
+      local tag_seen = base.name and guard["tag:" .. base.name] or false
+      if tag_seen then
+         return wrap_qualified(base, quals)
+      end
+      if base.name then
+         guard["tag:" .. base.name] = true
+      end
       local source = base
       if base.name ~= nil and not base.complete then
          local tag_lookup = ctx.scope:lookup(base.name, "tag")
@@ -187,7 +194,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       end
       local fields: {types.Field} = {}
       for _, f in ipairs(source.fields) do
-         table.insert(fields, { name = f.name, type = resolve_type(ctx, f.type, seen), bit_width = f.bit_width })
+         table.insert(fields, { name = f.name, type = resolve_type(ctx, f.type, guard), bit_width = f.bit_width })
       end
       local st: types.TypeNode = {
          tag = "struct",
@@ -198,6 +205,13 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       }
       return wrap_qualified(st, quals)
    elseif base is types.UnionType then
+      local tag_seen = base.name and guard["tag:" .. base.name] or false
+      if tag_seen then
+         return wrap_qualified(base, quals)
+      end
+      if base.name then
+         guard["tag:" .. base.name] = true
+      end
       local source = base
       if base.name ~= nil and not base.complete then
          local tag_lookup = ctx.scope:lookup(base.name, "tag")
@@ -213,7 +227,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       end
       local fields: {types.Field} = {}
       for _, f in ipairs(source.fields) do
-         table.insert(fields, { name = f.name, type = resolve_type(ctx, f.type, seen), bit_width = f.bit_width })
+         table.insert(fields, { name = f.name, type = resolve_type(ctx, f.type, guard), bit_width = f.bit_width })
       end
       local ut: types.TypeNode = {
          tag = "union",

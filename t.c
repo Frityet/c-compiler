@@ -13,8 +13,9 @@ int main()
 {
     Array_t(int, 5) my_array;
     fill_arr(&my_array);
+    Array_t(int, 5) arr2 = my_array;
     for (int i = 0; i < 5; i++) {
-        printf("%d\n", my_array.data[i]);
+        printf("%d\n", arr2.data[i]);
     }
     return 0;
 }

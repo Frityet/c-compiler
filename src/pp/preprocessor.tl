@@ -2,6 +2,7 @@ local Span = require("util.span")
 local Diagnostic = require("diag.diagnostics")
 local Reporter = require("diag.reporter")
 local LexerFast = require("lexer.lexer")
+local Target = require("util.target")
 
 local type Token = LexerFast.Token
 local type TokenKindType = LexerFast.TokenKind
@@ -171,25 +172,11 @@ local function define_function_macro(state: State, name: string, params: {string
    }
 end
 
-local function add_builtin_macros(state: State, file_id: integer)
-   define_object_macro(state, "__STDC__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__STDC_VERSION__", { new_token(TK_NUMBER, "199901L", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__STDC_HOSTED__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   -- Target defaults: clang-ish x86_64 macOS
-   define_object_macro(state, "__APPLE__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__MACH__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__GNUC__", { new_token(TK_NUMBER, "4", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__GNUC_MINOR__", { new_token(TK_NUMBER, "2", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__GNUC_PATCHLEVEL__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__clang__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__clang_major__", { new_token(TK_NUMBER, "14", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__clang_minor__", { new_token(TK_NUMBER, "0", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__clang_patchlevel__", { new_token(TK_NUMBER, "3", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__llvm__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__x86_64__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__amd64__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "__LP64__", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
-   define_object_macro(state, "_LP64", { new_token(TK_NUMBER, "1", Span.new(file_id, 0, 0, 1, 1), false) })
+local function add_builtin_macros(state: State, file_id: integer, macro_values: {string:string})
+   for name, body in pairs(macro_values) do
+      local toks = lex_tokens(body, file_id)
+      define_object_macro(state, name, toks)
+   end
 
    state.macros["__FILE__"] = {
       name = "__FILE__",
@@ -227,6 +214,7 @@ end
 
 local function make_state(reporter: Reporter, config: FastConfig, file_id: integer): State
    local base_dir = config.current_dir or (config.source_path and path_dir(config.source_path)) or "."
+   local target = Target.detect()
    local search_paths: {string} = {}
    local seen: {string:boolean} = {}
    local function add_path(p: string | nil)
@@ -248,16 +236,9 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
       end
    end
    if not config.no_system_paths then
-      add_path("/usr/local/include")
-      add_path("/usr/include")
-      add_path("/Library/Developer/CommandLineTools/usr/include")
-      add_path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include")
-      add_path("/Library/Developer/CommandLineTools/usr/lib/clang/14.0.3/include")
-      add_path("/Library/Developer/CommandLineTools/usr/lib/clang/14.0.0/include")
-      local sdkroot = os.getenv("SDKROOT")
-      if sdkroot is string then
-         add_path(sdkroot .. "/usr/include")
-         add_path(sdkroot .. "/usr/lib/clang")
+      local sys_paths = Target.default_include_paths(target)
+      for _, p in ipairs(sys_paths) do
+         add_path(p)
       end
    end
 
@@ -273,7 +254,7 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
       file_name_override = {},
    }
 
-   add_builtin_macros(st, file_id)
+   add_builtin_macros(st, file_id, Target.default_defines(target))
 
    if config.defines then
       local defs = config.defines as {string:string}
@@ -882,7 +863,7 @@ local function parse_include_target(tokens: {Token}, raw_source: string): string
             break
          elseif t.kind == TK_PUNCT and t.lexeme ~= "<" then
             pieces[#pieces + 1] = t.lexeme
-         elseif t.kind == TK_IDENTIFIER or t.kind == TK_NUMBER then
+         elseif t.kind == TK_IDENTIFIER or t.kind == TK_NUMBER or t.kind == TK_KEYWORD then
             pieces[#pieces + 1] = t.lexeme
          end
       end

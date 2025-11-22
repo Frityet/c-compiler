@@ -1002,7 +1002,7 @@ parse_postfix = function(p: Parser): ast.ExprNode
          local args: {ast.ExprNode} = {}
          if not at(p, TK_PUNCT, ")") then
             repeat
-               table.insert(args, parse_expression(p))
+               table.insert(args, parse_assignment(p))
                if not at(p, TK_PUNCT, ",") then
                   break
                end

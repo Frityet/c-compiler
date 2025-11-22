@@ -122,6 +122,19 @@ describe("preprocessor", function()
       assert.are.same({ "int", "incval", ";", "int", "main", "(", ")", ";" }, lexemes(pp.tokens))
    end)
 
+   it("parses include targets containing keywords", function()
+      local rep = Reporter.new()
+      local cfg = {
+         search_paths = { "spec/fixtures" },
+         defines = {},
+         undefs = {},
+         current_dir = ".",
+      }
+      local pp = Preprocessor.preprocess('#include <bits/long-double.h>\nint main();', 6, rep, cfg)
+      assert.are.equal(0, #rep.diagnostics)
+      assert.are.same({ "int", "ld_marker", ";", "int", "main", "(", ")", ";" }, lexemes(pp.tokens))
+   end)
+
    it("honors #pragma once to prevent duplicate includes", function()
       local rep = Reporter.new()
       local cfg = {

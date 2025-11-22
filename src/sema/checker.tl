@@ -580,15 +580,36 @@ local function check_binary_arith(ctx: Context, expr: ast.BinaryExpr, lhs: ExprI
    return res
 end
 
+local function qualifiers_subset(lhs: {types.TypeQualifier}, rhs: {types.TypeQualifier}): boolean
+   if #lhs == 0 then
+      return true
+   end
+   local available: {types.TypeQualifier:boolean} = {}
+   for _, q in ipairs(rhs) do
+      available[q] = true
+   end
+   for _, q in ipairs(lhs) do
+      if not available[q] then
+         return false
+      end
+   end
+   return true
+end
+
 local function check_assignment_compat(ctx: Context, target: types.TypeNode, value: types.TypeNode, span: Span, rhs_info?: ExprInfo)
    local target_res = resolve_type(ctx, target)
-   local value_res = resolve_type(ctx, value)
+   local value_res = decay_for_value(ctx, resolve_type(ctx, value))
    if target_res is types.PointerType then
       local val_base, _ = strip_qualifiers(value_res)
       if val_base is types.PointerType then
          local target_to = resolve_type(ctx, target_res.to)
          local val_to = resolve_type(ctx, val_base.to)
          if is_void_type(ctx, target_to) or is_void_type(ctx, val_to) or types_compatible(ctx, target_to, val_to) then
+            return
+         end
+         local tt_base, tt_quals = strip_qualifiers(target_to)
+         local vt_base, vt_quals = strip_qualifiers(val_to)
+         if types.equals(tt_base, vt_base) and qualifiers_subset(vt_quals, tt_quals) then
             return
          end
       end
@@ -644,15 +665,16 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
          len = math.max(0, #tok.lexeme - 2) + 1
       end
       local char_ty = make_builtin("char", expr.span, true)
+      local const_char = wrap_qualified(char_ty, { "const" })
       local arr: types.ArrayType = {
          tag = "array",
          span = expr.span,
-         of = char_ty,
+         of = const_char,
          size = len,
          size_expr = nil,
          is_vla = false,
          is_static = false,
-         qualifiers = { "const" },
+         qualifiers = {},
       }
       local info: ExprInfo = { type = arr, is_lvalue = true, is_constant = false, const_value = nil }
       record_expr(ctx, expr, info)

@@ -3,6 +3,7 @@ local Parser = require("parser.parser")
 local Checker = require("sema.checker")
 local Reporter = require("diag.reporter")
 local LexerFast = require("lexer.lexer")
+local Target = require("util.target")
 local types = require("sema.types")
 local ast = require("parser.ast")
 
@@ -25,23 +26,6 @@ local record GenerateOptions
    load_library: string | nil
    strip_prefix: string | nil
 end
-
-local DEFAULT_DEFINES = {
-   __APPLE__ = "1",
-   __MACH__ = "1",
-   __GNUC__ = "4",
-   __GNUC_MINOR__ = "2",
-   __GNUC_PATCHLEVEL__ = "1",
-   __clang__ = "1",
-   __clang_major__ = "14",
-   __clang_minor__ = "0",
-   __clang_patchlevel__ = "3",
-   __llvm__ = "1",
-   __x86_64__ = "1",
-   __amd64__ = "1",
-   __LP64__ = "1",
-   _LP64 = "1",
-}
 
 local record Collected
    structs: {string: types.StructType}
@@ -77,29 +61,8 @@ local function default_output(headers: {string}): string
    return basename_no_ext(first) .. ".ffi.tl"
 end
 
-local function build_system_prefixes(): {string}
-   local prefixes: {string} = {
-      "/usr/include/",
-      "/usr/local/include/",
-      "/Library/Developer/CommandLineTools/usr/include/",
-      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/",
-      "/Library/Developer/CommandLineTools/usr/lib/clang/14.0.3/include/",
-      "/Library/Developer/CommandLineTools/usr/lib/clang/14.0.0/include/",
-   }
-   local sdkroot = os.getenv("SDKROOT")
-   if sdkroot is string then
-      local normalized = sdkroot
-      if not normalized:match("/$") then
-         normalized = normalized .. "/"
-      end
-      table.insert(prefixes, normalized)
-      table.insert(prefixes, normalized .. "usr/include/")
-      table.insert(prefixes, normalized .. "usr/lib/clang/")
-   end
-   return prefixes
-end
-
-local SYSTEM_PREFIXES = build_system_prefixes()
+local HOST_TARGET = Target.detect()
+local SYSTEM_PREFIXES = Target.system_prefixes(HOST_TARGET)
 
 local function is_system_path(path: string): boolean
    for _, pref in ipairs(SYSTEM_PREFIXES) do
@@ -1081,7 +1044,7 @@ local function generate(opts: GenerateOptions, reporter?: Reporter, writer?: fun
    for idx, path in ipairs(opts.headers) do
       local pp = Preprocessor.preprocess_file(path, idx, rep, {
          search_paths = { path_dir(path) },
-         defines = DEFAULT_DEFINES,
+         defines = Target.default_defines(HOST_TARGET),
          undefs = {},
          current_dir = path_dir(path),
          source_path = path,
