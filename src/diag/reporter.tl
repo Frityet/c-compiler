@@ -61,12 +61,11 @@ local function format_traceback(tb: string | nil): {string}
    local cleaned: string = tb
    cleaned = cleaned:gsub("^stack traceback:\n?", "")
    for line in cleaned:gmatch("[^\n]+") do
-      local text: string = line as string
-      if text == "stack traceback:" then
+      if line == "stack traceback:" then
          goto continue
       end
-      if text ~= "" then
-         local trimmed = text:gsub("^%s*", "")
+      if line ~= "" then
+         local trimmed = line:gsub("^%s*", "")
          table.insert(out, trimmed)
       end
       ::continue::

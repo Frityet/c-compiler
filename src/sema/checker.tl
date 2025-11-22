@@ -35,7 +35,7 @@ local record SwitchContext
    has_default: boolean
 end
 
-local record Context
+local record Context is TypeCtx
    rep: Reporter
    globals: Scope
    scope: Scope
@@ -51,7 +51,7 @@ local record Context
 end
 
 local function resolve_type(ctx: Context, ty: types.TypeNode, seen?: {string:boolean}): types.TypeNode
-   return type_ops_raw.resolve_type(ctx as TypeCtx, ty, seen)
+   return type_ops_raw.resolve_type(ctx, ty, seen)
 end
 
 local function strip_qualifiers(ty: types.TypeNode): (types.TypeNode, {types.TypeQualifier})
@@ -59,43 +59,43 @@ local function strip_qualifiers(ty: types.TypeNode): (types.TypeNode, {types.Typ
 end
 
 local function is_void_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_void_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_void_type(ctx, ty)
 end
 
 local function is_integer_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_integer_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_integer_type(ctx, ty)
 end
 
 local function is_arithmetic_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_arithmetic_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_arithmetic_type(ctx, ty)
 end
 
 local function is_pointer_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_pointer_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_pointer_type(ctx, ty)
 end
 
 local function is_scalar_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_scalar_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_scalar_type(ctx, ty)
 end
 
 local function is_incomplete_type(ctx: Context, ty: types.TypeNode): boolean
-   return type_ops_raw.is_incomplete_type(ctx as TypeCtx, ty)
+   return type_ops_raw.is_incomplete_type(ctx, ty)
 end
 
 local function decay_for_value(ctx: Context, ty: types.TypeNode): types.TypeNode
-   return type_ops_raw.decay_for_value(ctx as TypeCtx, ty)
+   return type_ops_raw.decay_for_value(ctx, ty)
 end
 
 local function integer_promote(ctx: Context, ty: types.TypeNode): types.TypeNode
-   return type_ops_raw.integer_promote(ctx as TypeCtx, ty)
+   return type_ops_raw.integer_promote(ctx, ty)
 end
 
 local function usual_arithmetic_conversion(ctx: Context, lhs: types.TypeNode, rhs: types.TypeNode): types.TypeNode | nil
-   return type_ops_raw.usual_arithmetic_conversion(ctx as TypeCtx, lhs, rhs)
+   return type_ops_raw.usual_arithmetic_conversion(ctx, lhs, rhs)
 end
 
 local function types_compatible(ctx: Context, lhs: types.TypeNode, rhs: types.TypeNode): boolean
-   return type_ops_raw.types_compatible(ctx as TypeCtx, lhs, rhs)
+   return type_ops_raw.types_compatible(ctx, lhs, rhs)
 end
 
 local function make_builtin(name: types.BuiltinName, span: Span, is_signed?: boolean): types.BuiltinType
@@ -377,14 +377,11 @@ local function note_enum_constants(ctx: Context, ty: types.EnumType)
    local value_map: {string: integer | nil} = {}
    for _, ev in ipairs(ty.values) do
       value_map[ev.name] = ev.value
-      local sym: Symbol = {
+      local sym: symbols.Enum = {
          name = ev.name,
-         kind = "enum_const",
+         kind = "enum",
          type = ty.underlying,
-         storage = nil,
-         linkage = "none",
          span = ev.span,
-         is_tentative = false,
          is_defined = true,
          enum_value = ev.value,
       }
@@ -412,16 +409,13 @@ local function merge_tag(ctx: Context, ty: types.TypeNode)
 
    local existing = ctx.scope:lookup(name, "tag")
    if existing is nil then
-      local sym: Symbol = {
+      local sym: symbols.Tag = {
          name = name,
          kind = "tag",
          type = ty,
-         storage = nil,
-         linkage = "none",
          span = qualifier_span(ty),
          is_tentative = not complete,
          is_defined = complete,
-         enum_value = nil,
       }
       ctx.scope:define(sym, "tag")
       if ty is types.EnumType then
@@ -432,7 +426,7 @@ local function merge_tag(ctx: Context, ty: types.TypeNode)
 
    local existing_sym: Symbol = existing
 
-   if existing_sym.kind ~= "tag" then
+   if not existing_sym is symbols.Tag then
       report_conflict(ctx, name, qualifier_span(ty), "SEM004", "conflicting tag for")
       return
    end
@@ -521,52 +515,55 @@ local function ensure_object_type(ctx: Context, ty: types.TypeNode, span: Span)
    end
 end
 
-local function define_symbol(ctx: Context, sym: Symbol, namespace?: string)
+local function define_symbol(ctx: Context, sym: symbols.Symbol, namespace?: string)
    local ns = namespace or "object"
-   if sym.kind == "tag" then
+   if sym is symbols.Tag then
       ns = "tag"
-   elseif sym.kind == "label" then
+   elseif sym is symbols.Label then
       ns = "label"
    end
-   local existing = ctx.scope:lookup_here(sym.name, ns)
+   local existing = ctx.scope:lookup_here(sym, ns)
    if existing is nil then
       ctx.scope:define(sym, ns)
       return
    end
-   local existing_sym: Symbol = existing
 
-   if existing_sym.kind ~= sym.kind then
+   if existing.kind ~= sym.kind then
       report_conflict(ctx, sym.name, sym.span, "SEM002", "conflicting declaration for")
       return
    end
 
-   if not types_compatible(ctx, existing_sym.type, sym.type) then
+   if not types_compatible(ctx, existing.type, sym.type) then
       report_conflict(ctx, sym.name, sym.span, "SEM002", "conflicting type for")
       return
    end
 
-   if sym.kind == "typedef" then
+   if sym is symbols.TypeDef then
       report_conflict(ctx, sym.name, sym.span, "SEM003", "redefinition of")
       return
    end
 
-   if existing_sym.is_defined and sym.is_defined then
+   if existing.is_defined and sym.is_defined then
       report_conflict(ctx, sym.name, sym.span, "SEM003", "redefinition of")
       return
    end
 
-   local combined_defined = existing_sym.is_defined or sym.is_defined
-   local combined_tentative = (existing_sym.is_tentative or sym.is_tentative) and not combined_defined
+   local combined_defined = existing.is_defined or sym.is_defined
 
-   existing_sym.is_defined = combined_defined
-   existing_sym.is_tentative = combined_tentative
-   existing_sym.linkage = sym.linkage
-   existing_sym.storage = sym.storage
-   existing_sym.span = sym.span
-   if sym.enum_value ~= nil then
-      existing_sym.enum_value = sym.enum_value
+   existing.is_defined = combined_defined
+   if sym is symbols.Dynamic then
+      local combined_tentative = ((existing as symbols.Dynamic).is_tentative or sym.is_tentative) and not combined_defined
+      (existing as symbols.Dynamic).is_tentative = combined_tentative
+      (existing as symbols.Dynamic).linkage = sym.linkage
+      if sym is symbols.Storable then
+         (existing as symbols.Storable).storage = sym.storage
+      end
    end
-   ctx.scope:define(existing_sym, ns)
+   existing.span = sym.span
+   if sym is symbols.Enum then
+      (existing as symbols.Enum).enum_value = sym.enum_value
+   end
+   ctx.scope:define(existing, ns)
 end
 
 local function check_binary_arith(ctx: Context, expr: ast.BinaryExpr, lhs: ExprInfo, rhs: ExprInfo): types.TypeNode | nil
@@ -689,12 +686,12 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
          record_expr(ctx, expr, info)
          return info
       end
-      if sym.kind == "enum_const" then
+      if sym is symbols.Enum then
          local val = sym.enum_value
          local info: ExprInfo = { type = sym.type, is_lvalue = false, is_constant = true, const_value = val }
          record_expr(ctx, expr, info)
          return info
-      elseif sym.kind == "typedef" then
+      elseif sym is symbols.TypeDef then
          ctx.rep:report(Diagnostic.new("error", string.format("typedef name '%s' used as value", name), expr.span, "SEM020"))
          local info: ExprInfo = { type = sym.type, is_lvalue = false, is_constant = false, const_value = nil }
          record_expr(ctx, expr, info)
@@ -1181,7 +1178,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
       if not has_storage(specs, "extern") and is_incomplete_type(ctx, decl.type) then
          ctx.rep:report(Diagnostic.new("error", "incomplete type in definition", decl.span, "SEM031"))
       end
-      local sym: Symbol = {
+      local sym: symbols.Object = {
          name = name_tok.lexeme,
          kind = "object",
          type = decl.type,
@@ -1190,7 +1187,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          span = decl.span,
          is_tentative = is_file_scope and not is_def and not has_storage(specs, "extern"),
          is_defined = is_def,
-         enum_value = nil,
+         -- enum_value = nil,
       }
       define_symbol(ctx, sym)
       if decl.init ~= nil then
@@ -1212,7 +1209,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          validate_function(ctx, fn_ty_node)
          fn_type = fn_ty_node
       end
-      local sym: Symbol = {
+      local sym: symbols.Function = {
          name = name_tok.lexeme,
          kind = "function",
          type = decl.type,
@@ -1221,7 +1218,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          span = decl.span,
          is_tentative = false,
          is_defined = decl.body ~= nil,
-         enum_value = nil,
+         -- enum_value = nil,
       }
       define_symbol(ctx, sym)
       if decl.body ~= nil and not (fn_type is nil) then
@@ -1246,7 +1243,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
                   ctx.rep:report(Diagnostic.new("error", "duplicate parameter name", p.span, "SEM002"))
                end
                param_names[pname] = true
-               local psym: Symbol = {
+               local psym: symbols.Object = {
                   name = pname,
                   kind = "object",
                   type = p.type,
@@ -1255,7 +1252,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
                   span = p.span,
                   is_tentative = false,
                   is_defined = true,
-                  enum_value = nil,
+                  -- enum_value = nil,
                }
                define_symbol(ctx, psym)
             end
@@ -1282,16 +1279,16 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
       end
       collect_tags(ctx, decl.type, nil)
 
-      local sym: Symbol = {
+      local sym: symbols.TypeDef = {
          name = name_tok.lexeme,
          kind = "typedef",
          type = decl.type,
-         storage = nil,
+         -- storage = nil,
          linkage = "none",
          span = decl.span,
          is_tentative = false,
          is_defined = true,
-         enum_value = nil,
+         -- enum_value = nil,
       }
       define_symbol(ctx, sym)
    elseif decl is ast.TagDecl then

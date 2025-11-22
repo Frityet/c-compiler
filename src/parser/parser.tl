@@ -19,15 +19,7 @@ local TK_PUNCT: TokenKindType = LexerFast.K_PUNCT
 local TK_EOF: TokenKindType = LexerFast.K_EOF
 
 local type LexerState = LexerFast.LexerState
-
-local record TokenC
-   start: integer
-   stop: integer
-   line: integer
-   col: integer
-   kind: integer
-   flags: integer
-end
+local type TokenC = LexerFast.TokenC
 
 local K_IDENTIFIER = LexerFast.K_IDENTIFIER
 local K_NUMBER = LexerFast.K_NUMBER
@@ -101,7 +93,7 @@ end
 local function fast_iter(source: string, file_id: integer): TokenIterator
    local lexer = LexerFast.new_lexer(source, file_id)
    return function(): Token
-      local tc = LexerFast.next_token(lexer) as TokenC
+      local tc = LexerFast.next_token(lexer)
       local kind = token_kind_from_fast(tc.kind)
       local lx = lexeme_from_fast(lexer, tc)
       local span = Span.new(file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
@@ -1462,14 +1454,14 @@ local function tokens_to_iter(tokens: {Token}): TokenIterator
    if last is nil then
       error("parser requires at least one token")
    end
-   local tail = last as Token
+   
    return function(): Token
       idx = idx + 1
       local t = tokens[idx]
       if t then
          return t
       end
-      return tail
+      return last
    end
 end
 

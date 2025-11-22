@@ -1,14 +1,13 @@
 local function dump_table(tbl: any, indent: integer)
    indent = indent or 0
    local pad = string.rep(" ", indent)
-   if type(tbl) ~= "table" then
+   if not tbl is {any:any} then
       print(pad .. tostring(tbl))
       return
    end
 
-   local t = tbl as {any:any}
-   for k, v in pairs(t) do
-      if type(v) == "table" then
+   for k, v in pairs(tbl) do
+      if v is table then
          print(string.format("%s%s:", pad, tostring(k)))
          dump_table(v, indent + 2)
       else

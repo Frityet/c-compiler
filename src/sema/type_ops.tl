@@ -117,11 +117,8 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       end
       guard[name] = true
       local sym_lookup = ctx.scope:lookup(name)
-      if sym_lookup ~= nil then
-         local sym: Symbol = sym_lookup
-         if sym.kind == "typedef" then
-            return wrap_qualified(resolve_type(ctx, sym.type, guard), quals)
-         end
+      if not sym_lookup is nil and sym_lookup is symbols.TypeDef then
+         return wrap_qualified(resolve_type(ctx, sym_lookup.type, guard), quals)
       end
       ctx.rep:report(Diagnostic.new("error", string.format("unknown type name '%s'", name), base.span, "SEM020"))
       return wrap_qualified(make_builtin("int", base.span, true), quals)
@@ -139,7 +136,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       local size = base.size
       if size is nil then
          local sz_expr = base.size_expr
-         if sz_expr ~= nil and sz_expr is ast.NumberLiteralExpr then
+         if sz_expr and sz_expr is ast.NumberLiteralExpr then
             local parsed = tonumber(sz_expr.token.lexeme)
             if parsed then
                size = math.floor(parsed)
@@ -182,13 +179,10 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       local source = base
       if base.name ~= nil and not base.complete then
          local tag_lookup = ctx.scope:lookup(base.name, "tag")
-         if tag_lookup ~= nil then
-            local tag_sym: Symbol = tag_lookup
-            if tag_sym.kind == "tag" then
-               local tag_ty = tag_sym.type
-               if tag_ty is types.StructType then
-                  source = tag_ty
-               end
+         if not tag_lookup is nil and tag_lookup is symbols.Tag then
+            local tag_ty = tag_lookup.type
+            if tag_ty is types.StructType then
+               source = tag_ty
             end
          end
       end
@@ -196,7 +190,7 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
       for _, f in ipairs(source.fields) do
          table.insert(fields, { name = f.name, type = resolve_type(ctx, f.type, guard), bit_width = f.bit_width })
       end
-      local st: types.TypeNode = {
+      local st: types.StructType = {
          tag = "struct",
          span = source.span,
          name = source.name,
@@ -213,15 +207,12 @@ local function resolve_type(ctx: TypeCtx, ty: types.TypeNode, seen?: {string:boo
          guard["tag:" .. base.name] = true
       end
       local source = base
-      if base.name ~= nil and not base.complete then
+      if base.name and not base.complete then
          local tag_lookup = ctx.scope:lookup(base.name, "tag")
-         if tag_lookup ~= nil then
-            local tag_sym: Symbol = tag_lookup
-            if tag_sym.kind == "tag" then
-               local tag_ty = tag_sym.type
-               if tag_ty is types.UnionType then
-                  source = tag_ty
-               end
+         if not tag_lookup is nil and tag_lookup is symbols.Tag then
+            local tag_ty = tag_lookup.type
+            if tag_ty is types.UnionType then
+               source = tag_ty
             end
          end
       end

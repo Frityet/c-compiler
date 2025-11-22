@@ -73,6 +73,7 @@ end
 
 local interface Expr
    is types.ExpressionRef
+   where self.kind
    kind: ExprKind
    span: Span
 end

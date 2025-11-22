@@ -725,8 +725,8 @@ local function emit_enum(buf: {string}, en: types.EnumType)
    table.insert(buf, "};")
 end
 
-local function sorted_keys(tbl: {string:any}): {string}
-   local keys: {string} = {}
+local function sorted_keys<K, V>(tbl: {K:V}): {K}
+   local keys: {K} = {}
    for k, _ in pairs(tbl) do
       table.insert(keys, k)
    end

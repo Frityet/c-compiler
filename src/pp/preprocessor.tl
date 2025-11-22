@@ -230,8 +230,8 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
 
    add_path(base_dir)
    local cfg_paths = config.search_paths
-   if cfg_paths ~= nil then
-      local arr = cfg_paths as {string}
+   if not cfg_paths is nil then
+      local arr = cfg_paths
       for i = 1, #arr do
          add_path(arr[i])
       end
@@ -341,7 +341,7 @@ local function token_paste(lhs: Token | nil, rhs: Token | nil, file_id: integer)
      return {}
    end
    if lhs is nil then
-      return { rhs as Token }
+      return { rhs }
    end
    if rhs is nil then
       return { lhs }
@@ -1193,8 +1193,8 @@ local function preprocess_fast(source: string, file_id: integer, reporter?: Repo
    local rep = reporter or Reporter.new()
    local base_cfg = config or {}
    local search_paths: {string} = base_cfg.search_paths or { "." }
-   local defines: {string:string} = base_cfg.defines or {} as {string:string}
-   local undefs: {string:boolean} = base_cfg.undefs or {} as {string:boolean}
+   local defines: {string:string} = base_cfg.defines or {} 
+   local undefs: {string:boolean} = base_cfg.undefs or {}
    local cfg: FastConfig = {
       search_paths = search_paths,
       defines = defines,
