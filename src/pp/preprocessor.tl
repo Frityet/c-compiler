@@ -256,7 +256,7 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
       file_name_override = {},
    }
 
-   local want_extensions = not (config.strict_c99 or false)
+   local want_extensions = not (config.strict_c99 or true)
    local function tokens_from_body(body: string): {Token}
       local toks = lex_tokens(body, file_id)
       if #toks > 0 and toks[#toks].kind == TK_EOF then
@@ -287,8 +287,8 @@ local function make_state(reporter: Reporter, config: FastConfig, file_id: integ
    def_obj("__wur", "")
    def_obj("__attribute_deprecated__", "")
    def_obj("__NTH", "")
-   def_obj("__builtin_va_list", "void *")
-   def_obj("__gnuc_va_list", "__builtin_va_list")
+   -- def_obj("__builtin_va_list", "void *")
+   -- def_obj("__gnuc_va_list", "__builtin_va_list")
 
    define_function_macro(st, "__builtin_expect", { "x", "y" }, false, tokens_from_body("(x)"))
    define_function_macro(st, "__builtin_constant_p", { "x" }, false, tokens_from_body("0"))

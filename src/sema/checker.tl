@@ -501,7 +501,7 @@ local function find_field(st: types.StructType | types.UnionType, name: string):
    return nil
 end
 
-local function ensure_object_type(ctx: Context, ty: types.TypeNode, span: Span)
+local function ensure_object_type(ctx: Context, ty: types.TypeNode, span: Span, is_extern?: boolean)
    if is_void_type(ctx, ty) then
       ctx.rep:report(Diagnostic.new("error", "variable has incomplete type 'void'", span, "SEM021"))
       return
@@ -510,7 +510,7 @@ local function ensure_object_type(ctx: Context, ty: types.TypeNode, span: Span)
       ctx.rep:report(Diagnostic.new("error", "function type is not valid for objects", span, "SEM021"))
       return
    end
-   if is_incomplete_type(ctx, ty) then
+   if is_incomplete_type(ctx, ty) and not is_extern then
       ctx.rep:report(Diagnostic.new("error", "incomplete type in object declaration", span, "SEM031"))
    end
 end
@@ -1174,7 +1174,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          is_def = true
       end
       validate_storage(ctx, decl.type, storage)
-      ensure_object_type(ctx, decl.type, decl.span)
+      ensure_object_type(ctx, decl.type, decl.span, has_storage(specs, "extern"))
       if not has_storage(specs, "extern") and is_incomplete_type(ctx, decl.type) then
          ctx.rep:report(Diagnostic.new("error", "incomplete type in definition", decl.span, "SEM031"))
       end
