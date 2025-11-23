@@ -6,4 +6,6 @@ Read through `tl-docs/` to understand how teal works, you can use:
 4. `./luarocks` to run luarocks for dependencies
 5. `./lua_modules/bin/busted` for tests
 
-The project is targeting LuaJIT on x86_64 macOS
+The project is targeting LuaJIT on x86_64
+
+DO NOT USE `any`!! Make very lose use of `as` casts, preferring to use interfaces (`is`, `where`) and `is` for flow analysis to make sure everything is strictly typed.
