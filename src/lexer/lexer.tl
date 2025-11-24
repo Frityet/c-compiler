@@ -8,16 +8,16 @@ local type TokenKind = integer
 local type TokenFlags = integer
 
 -- Token Kinds
-local K_UNKNOWN = 0
-local K_IDENTIFIER = 1
-local K_NUMBER = 2
-local K_STRING = 3
-local K_CHAR = 4
-local K_KEYWORD = 5
-local K_PUNCT = 6
-local K_EOF = 7
-local K_COMMENT = 8
-local K_WHITESPACE = 9
+local K_UNKNOWN<const> = 0
+local K_IDENTIFIER<const> = 1
+local K_NUMBER<const> = 2
+local K_STRING<const> = 3
+local K_CHAR<const> = 4
+local K_KEYWORD<const> = 5
+local K_PUNCT<const> = 6
+local K_EOF<const> = 7
+local K_COMMENT<const> = 8
+local K_WHITESPACE<const> = 9
 
 -- Token Flags
 local TOKEN_FLAG_NEWLINE = 1
@@ -54,9 +54,7 @@ local record Token
    has_newline: boolean
 end
 
-local record Uint8Array is {integer}, ffi.CData
-end
-
+local type Uint8Array = ffi.Array<integer>
 local type Uint8Ptr = ffi.Pointer<integer>
 
 local TokenType = ffi.typeof("tl_token_fast")
@@ -74,11 +72,11 @@ local record LexerState
 end
 
 -- Character Properties Lookup Table (FFI)
-local PROP_SPACE = 1
-local PROP_DIGIT = 2
-local PROP_ALPHA = 4
-local PROP_IDENT = 8 -- ALPHA | DIGIT | _
-local PROP_HEX = 16
+local PROP_SPACE<const> = 1
+local PROP_DIGIT<const> = 2
+local PROP_ALPHA<const> = 4
+local PROP_IDENT<const> = 8 -- ALPHA | DIGIT | _
+local PROP_HEX<const> = 16
 
 local char_props_c: Uint8Array = ffi.new("uint8_t[256]")
 local function init_char_props()
@@ -126,6 +124,131 @@ local keywords: {string:boolean} = {
    ["restrict"] = true, ["_Alignas"] = true, ["_Alignof"] = true, ["_Atomic"] = true,
    ["_Generic"] = true, ["_Noreturn"] = true, ["_Static_assert"] = true, ["_Thread_local"] = true,
 }
+
+-- ffi.cdef [[
+-- bool is_keyword_c(const unsigned char *s, int len);
+-- ]]
+-- local fastcmp = ffi.load(os.getenv("LIBFASTCMP") or "fastcmp")
+-- local macroexp is_keyword_c(s: Uint8Ptr, len: integer): boolean
+--    return (fastcmp.is_keyword_c as function(ffi.CData, integer))(s, len)
+-- end
+
+ffi.cdef [[
+int memcmp(const void *s1, const void *s2, size_t n);
+]]
+local C = ffi.C
+
+local macroexp is_kw(s: Uint8Ptr, kw: string, kwlen: integer): boolean
+   return (C.memcmp as function(ffi.CData, ffi.String, integer))(s, kw, kwlen) == 0
+end
+
+local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
+   if len < 2 or len > 15 then
+      return false
+   end
+
+   local c0 = s[0]
+
+   -- len == 2
+   if len == 2 then
+      local c1 = s[1]
+      return (c0 == 100 and c1 == 111) or      -- do
+             (c0 == 105 and c1 == 102)         -- if
+
+   -- len == 3
+   elseif len == 3 then
+      return (c0 == 102 and s[1] == 111 and s[2] == 114) or  -- for
+             (c0 == 105 and s[1] == 110 and s[2] == 116)     -- int
+
+   -- len == 4
+   elseif len == 4 then
+      local c1, c2, c3 = s[1], s[2], s[3]
+      -- auto / case / char / else / enum / goto / long / void
+      if c0 == 97 then         -- 'a'
+         return c1 == 117 and c2 == 116 and c3 == 111         -- auto
+      elseif c0 == 99 then     -- 'c'
+         return (c1 == 97 and c2 == 115 and c3 == 101) or     -- case
+                (c1 == 104 and c2 == 97 and c3 == 114)        -- char
+      elseif c0 == 101 then    -- 'e'
+         return (c1 == 108 and c2 == 115 and c3 == 101) or    -- else
+                (c1 == 110 and c2 == 117 and c3 == 109)       -- enum
+      elseif c0 == 103 then    -- 'g'
+         return c1 == 111 and c2 == 116 and c3 == 111         -- goto
+      elseif c0 == 108 then    -- 'l'
+         return c1 == 111 and c2 == 110 and c3 == 103         -- long
+      elseif c0 == 118 then    -- 'v'
+         return c1 == 111 and c2 == 105 and c3 == 100         -- void
+      else
+         return false
+      end
+
+   -- len == 5
+   elseif len == 5 then
+      local c1, c2, c3, c4 = s[1], s[2], s[3], s[4]
+      return (c0 == 98 and c1 == 114 and c2 == 101 and c3 == 97 and c4 == 107) or -- break
+             (c0 == 99 and c1 == 111 and c2 == 110 and c3 == 115 and c4 == 116) or -- const
+             (c0 == 102 and c1 == 108 and c2 == 111 and c3 == 97 and c4 == 116) or -- float
+             (c0 == 115 and c1 == 104 and c2 == 111 and c3 == 114 and c4 == 116) or -- short
+             (c0 == 119 and c1 == 104 and c2 == 105 and c3 == 108 and c4 == 101)    -- while
+
+   -- len == 6
+   elseif len == 6 then
+      -- double, extern, return, sizeof, static, struct, switch, inline
+      if c0 == 100 then
+         return is_kw(s, "double", 6)
+      elseif c0 == 101 then
+         return is_kw(s, "extern", 6)
+      elseif c0 == 114 then
+         return is_kw(s, "return", 6)
+      elseif c0 == 115 then
+         return is_kw(s, "sizeof", 6) or is_kw(s, "static", 6) or is_kw(s, "struct", 6) or is_kw(s, "switch", 6)
+      elseif c0 == 105 then
+         return is_kw(s, "inline", 6)
+      else
+         return false
+      end
+
+   -- len == 7
+   elseif len == 7 then
+      -- typedef, volatile
+      if c0 == 116 then
+         return is_kw(s, "typedef", 7)
+      elseif c0 == 118 then
+         return is_kw(s, "volatile", 7)
+      else
+         return false
+      end
+
+   -- len == 8
+   elseif len == 8 then
+      -- continue, register, unsigned, _Complex, _Atomic
+      if c0 == 99 then
+         return is_kw(s, "continue", 8)
+      elseif c0 == 114 then
+         return is_kw(s, "register", 8)
+      elseif c0 == 117 then
+         return is_kw(s, "unsigned", 8)
+      elseif c0 == 95 then
+         return is_kw(s, "_Complex", 8) or is_kw(s, "_Atomic", 8)
+      else
+         return false
+      end
+
+   -- len == 9, 10, 11, 12, 13, etc.
+   elseif len == 5 and c0 == 95 then
+      return is_kw(s, "_Bool", 5)
+   elseif len == 10 and c0 == 95 then
+      -- _Alignas, _Alignof, _Noreturn
+      return is_kw(s, "_Alignas", 8) or is_kw(s, "_Alignof", 8) or is_kw(s, "_Noreturn", 9)
+   elseif len == 14 then
+      return is_kw(s, "_Static_assert", 14)
+   elseif len == 13 then
+      return is_kw(s, "_Thread_local", 13)
+   else
+      return false
+   end
+end
+
 
 local function new_lexer(source: string, file_id: integer): LexerState
    local len = #source
@@ -218,8 +341,9 @@ local function next_token(state: LexerState): TokenC
             c = ptr[pos]
          until band(cp[c], PROP_IDENT) == 0
          
-         local s = ffi.string(ptr + start_pos, pos - start_pos)
-         kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
+         -- local s = ffi.string(ptr + start_pos, pos - start_pos)
+         -- kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
+         kind = is_keyword_c(ptr + start_pos, pos - start_pos) and K_KEYWORD or K_IDENTIFIER
       
       -- Number
       elseif band(cp[c], PROP_DIGIT) ~= 0 then

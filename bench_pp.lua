@@ -1,7 +1,7 @@
 
 package.path = "build/?.lua;build/?/init.lua;" .. package.path
 local PP = require("pp.pp_fast")
-local LexerFast = require("lexer.lexer_fast")
+local LexerFast = require("lexer.lexer")
 
 local function read_file(path)
    local f = io.open(path, "rb")
@@ -18,12 +18,14 @@ if #source < 100000 then
 end
 print("Source size: " .. #source .. " bytes")
 
-local iterations = 20
+local niter = os.getenv("NITER")
+local iterations = niter and tonumber(niter) or 20
 
 local reporter = {
    error = function(self, msg) end,
    warn = function(self, msg) end
 }
+
 
 local function bench_pp()
    local start = os.clock()

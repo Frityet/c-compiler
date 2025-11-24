@@ -63,7 +63,24 @@ local record ffi
     new: function<T is CData>(ct: CType | string, ...: any): T
     cast: function<T is CData>(ct: CType | string, ...: any): T
     -- cast: function<T is CData>(ct: CType | string, f: function()): Function<function(T): nil>
-    metatype: function<T is CType>(ct: T | string, metatable: metatable<T>): T
+    interface MetatypeMetatable<T is CData>
+        __index: T | function(self: T, key: string): any
+        __newindex: function(self: T, key: string, value: any): nil
+        __new: function(...: any): T
+        __call: function(self: T, ...: any): any
+        __tostring: function(self: T): string
+        __add: function(self: T, other: any): any
+        __sub: function(self: T, other: any): any
+        __mul: function(self: T, other: any): any
+        __div: function(self: T, other: any): any
+        __mod: function(self: T, other: any): any
+        __unm: function(self: T): any
+        __eq: function(self: T, other: any): boolean
+        __lt: function(self: T, other: any): boolean
+        __le: function(self: T, other: any): boolean
+        __concat: function(self: T, other: any): string
+    end
+    metatype: function<T is CData>(ct: T | CType | string, metatable: MetatypeMetatable<T>): T
     gc: function<T is CData>(v: T, f: function(T)): T
     sizeof: function(ct: CType | string | CData, nelem?: integer): integer | nil
     alignof: function(ct: CType | string | CData): integer

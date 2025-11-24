@@ -4,7 +4,7 @@ local Preprocessor = require("pp.preprocessor")
 local Parser = require("parser.parser")
 local Reporter = require("diag.reporter")
 
-local function read_file(path: string): string | nil
+local function read_file(path)
    local fh = io.open(path, "rb")
    if not fh then
       return nil
@@ -21,11 +21,11 @@ end
 
 local iterations = 30
 
-local function bench_stream(): number
+local function bench_stream()
    local start = os.clock()
    for _ = 1, iterations do
       local rep = Reporter.new()
-      local pp = Preprocessor.preprocess_fast(source, 1, rep, {
+      local pp = Preprocessor.preprocess(source, 1, rep, {
          search_paths = { "." },
          defines = {},
          undefs = {},
