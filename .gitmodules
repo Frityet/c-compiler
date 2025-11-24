@@ -1,3 +1,7 @@
 [submodule "types/extern"]
 	path = types/extern
 	url = https://github.com/teal-language/teal-types
+[submodule "extern/tl"]
+	path = extern/tl
+	url = https://github.com/frityet/tl
+	branch = final
