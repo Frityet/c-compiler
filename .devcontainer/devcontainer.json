@@ -24,7 +24,7 @@
 				"llvm-vs-code-extensions.vscode-clangd"
 			],
 			"settings": {
-				"teal.compilerPath": "/workspaces/c-compiler/lua_modules/bin/tl"
+				"teal.compilerPath": "/workspaces/c-compiler/lua /workspaces/c-compiler/extern/tl/tl"
 			}
 		}
 	},

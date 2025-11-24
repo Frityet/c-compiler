@@ -30,6 +30,7 @@ typedef struct {
   uint32_t stop;       /* exclusive */
   uint32_t line;       /* 1-based */
   uint32_t col;        /* 1-based */
+  uint32_t file_id;    /* File ID */
   uint8_t kind;        /* TokenKindId */
   uint8_t flags;       /* TokenFlags */
 } tl_token_fast;
@@ -41,6 +42,7 @@ local record TokenC is ffi.CData
    stop: integer
    line: integer
    col: integer
+   file_id: integer
    kind: integer
    flags: integer
 end
@@ -385,6 +387,7 @@ local function next_token(state: LexerState): TokenC
    state.newline_flag = 0
    
    local tok = state.current_token
+   tok.file_id = state.file_id
    if kind == K_EOF then
       tok.kind = K_EOF
       tok.start = pos

@@ -10,12 +10,13 @@ local record ffi
     interface Pointer<T is CData> is {T}, CData where require("reflect").typeof(self).what == "ptr"
         metamethod __add: function(self, offset: integer): self
     end
-    record CString is {integer}, Pointer<integer> where (require as function(string): {string:function(any, x: any): boolean})("ffi").istype("char *", self) end
+    record CString is {integer}, Pointer<CInteger> where (require as function(string): {string:function(any, x: any): boolean})("ffi").istype("char *", self) end
     type String = CString | string
     interface CInteger is CData where require("reflect").typeof(self).what == "int" end
     interface CFloat is CData where require("reflect").typeof(self).what == "float" end
     interface Reference<T is CData> is T, CData where require("reflect").typeof(self).what == "ref" end
-    interface Array<T is CData> is {T}, CData where require("reflect").typeof(self).what == "array" end
+    interface Array<T is CData> is {T}, Pointer<T> where require("reflect").typeof(self).what == "array" end
+    
     record Function<T> is CData where require("reflect").typeof(self).what == "func"
         metamethod __call: T
     end
@@ -70,9 +71,21 @@ local record ffi
     istype: function(ct: CType | string | CData, v: any): boolean
     errno: function(newerr?: integer): integer
     string: function(ptr: CData, len?: integer): string
-    copy: function<T is CData>(dest: Pointer<T>, src: Pointer<T> | Array<T> | string, size: integer)
-    copy: function<T is CData>(dest: Array<T>, src: Array<T> | string, size: integer)
-    fill: function<T is CData>(dest: Pointer<T>, size: integer, value: T)
+
+    copy: function<T is CData>(dest: Pointer<T>, src: Pointer<T>, size: integer)
+    copy: function<T is CData>(dest: Pointer<T>, src: Array<T>, size: integer)
+    copy: function<T is CData>(dest: Pointer<T>, src: string, size: integer)
+    copy: function<T is CData>(dest: Pointer<T>, src: T, size: integer)
+
+    -- copy: function<T is CData>(dest: Array<T>, src: Pointer<T>, size: integer)
+    -- copy: function<T is CData>(dest: Array<T>, src: Array<T>, size: integer)
+    -- copy: function<T is CData>(dest: Array<T>, src: string, size: integer)
+    -- copy: function<T is CData>(dest: Array<T>, src: T, size: integer)
+
+    -- copy: function<T is CData>(dest: Array<T>, src: Array<T> | string, size: integer)
+    -- copy: function<T is CData>(dest: Pointer<T>, src: T, size: integer)
+    -- copy: function<T is CData>(dest: Array<T>, src: T, size: integer)
+    -- fill: function<T is CData>(dest: Pointer<T>, size: integer, value: T)
     abi: function(what: string): boolean
 
     --here be dragons

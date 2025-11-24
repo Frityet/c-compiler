@@ -17,8 +17,7 @@ local reporter_mt: metatable<Reporter> = {
    __index = Reporter,
 }
 
-local no_color = os.getenv("NO_COLOR")
-local use_color = no_color is nil
+local use_color = not not os.getenv("NO_COLOR")
 
 local function colorize(text: string, code: string): string
    if not use_color then

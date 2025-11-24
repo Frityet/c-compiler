@@ -1,6 +1,5 @@
 package.path = "build/?.lua;build/?/init.lua;" .. package.path
-local LexerFFI = require("lexer.lexer_ffi")
-local LexerFast = require("lexer.lexer_fast")
+local Lexer = require("lexer.lexer")
 local Preprocessor = require("pp.preprocessor")
 
 local function read_file(path)
@@ -25,37 +24,25 @@ print("Benchmarking with bench.c (" .. #source .. " bytes)")
 print("--- Warmup ---")
 local start = os.clock()
 for _ = 1, warmup do
-   LexerFFI.lex(source, 1)
+   Lexer.lex(source, 1)
 end
-print("LexerFFI: " .. (os.clock() - start) .. " seconds for " .. warmup .. " iterations")
+print("Lexer: " .. (os.clock() - start) .. " seconds for " .. warmup .. " iterations")
 
 start = os.clock()
 for _ = 1, warmup do
-   LexerFast.lex(source, 1)
+   Preprocessor.preprocess_fast(source, 1)
 end
-print("LexerFast: " .. (os.clock() - start) .. " seconds for " .. warmup .. " iterations")
-
-start = os.clock()
-for _ = 1, warmup do
-   Preprocessor.preprocess(source, 1)
-end
-print("Preprocessor: " .. (os.clock() - start) .. " seconds for " .. warmup .. " iterations")
+print("Preprocessor (stream): " .. (os.clock() - start) .. " seconds for " .. warmup .. " iterations")
 
 print("--- Benchmark ---")
 start = os.clock()
 for _ = 1, iterations do
-   LexerFFI.lex(source, 1)
+   Lexer.lex(source, 1)
 end
-print("LexerFFI: " .. (os.clock() - start) .. " seconds for " .. iterations .. " iterations")
+print("Lexer: " .. (os.clock() - start) .. " seconds for " .. iterations .. " iterations")
 
 start = os.clock()
 for _ = 1, iterations do
-   LexerFast.lex(source, 1)
+   Preprocessor.preprocess_fast(source, 1)
 end
-print("LexerFast: " .. (os.clock() - start) .. " seconds for " .. iterations .. " iterations")
-
-start = os.clock()
-for _ = 1, iterations do
-   Preprocessor.preprocess(source, 1)
-end
-print("Preprocessor: " .. (os.clock() - start) .. " seconds for " .. iterations .. " iterations")
+print("Preprocessor (stream): " .. (os.clock() - start) .. " seconds for " .. iterations .. " iterations")

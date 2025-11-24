@@ -1,4 +1,4 @@
-Read through `tl-docs/` to understand how teal works, you can use:
+Read through `extern/tl/docs/src/` to understand how teal works, you can use:
 
 1. `./lua_modules/bin/tl` to run the teal compiler
 2. `./lua_modules/bin/cyan` to use the cyan build system
