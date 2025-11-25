@@ -7,6 +7,7 @@ local Target = require("util.target")
 local Diagnostic = require("diag.diagnostics")
 local types = require("sema.types")
 local ast = require("parser.ast")
+local fs = require("util.fs")
 
 local type TypeNode = types.TypeNode
 local type TranslationUnit = ast.TranslationUnit
@@ -511,7 +512,7 @@ local function decl_path(d: ast.DeclNode, rep: Reporter): string | nil
       local name_tok = dd.declarator.name
       if not name_tok is nil then
          local tok: Token = name_tok
-         local ctx_any = rep:get_file(tok.span.file_id) as FileContext | nil
+         local ctx_any = rep:get_file(tok.file_id) as FileContext | nil
          if not ctx_any is nil then
             local ctx: FileContext = ctx_any as FileContext
             if ctx.path then
@@ -551,7 +552,7 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
          local name_tok = d.declarator.name
          if not name_tok is nil then
             local tok: Token = name_tok
-            local name = tok.lexeme
+            local name = tok:lexeme(tu.src_ptr)
             if not has_storage(d.specifiers, "static") then
                local existing = col.functions[name]
                if existing is nil then
@@ -566,7 +567,7 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
          local name_tok = d.declarator.name
          if not name_tok is nil then
             local tok: Token = name_tok
-            local nm = tok.lexeme
+            local nm = tok:lexeme(tu.src_ptr)
             local existing_td = col.typedefs[nm]
             if existing_td is nil then
                col.typedefs[nm] = d.type
@@ -1044,15 +1045,19 @@ local function generate(opts: GenerateOptions, reporter?: Reporter, writer?: fun
    end
 
    for idx, path in ipairs(opts.headers) do
-      local pp = Preprocessor.preprocess_file(path, idx, rep, {
+      local pp = Preprocessor.preprocess(assert(fs.read_all(path)), idx, rep--[[, {
          search_paths = { path_dir(path) },
          defines = Target.default_defines(HOST_TARGET, true),
-         undefs = {},
-         current_dir = path_dir(path),
-         source_path = path,
-         no_system_paths = false,
-      })
-      local tu = Parser.parse(pp.text, pp.file_id, rep, pp.tokens)
+      undefs = {},
+      current_dir = path_dir(path),
+      source_path = path,
+      no_system_paths = false,
+      }]])
+      local lex = pp.lexer
+      if lex is nil then
+         return nil
+      end
+      local tu = Parser.parse(lex.src_ptr, pp.next, rep)
       local checked = Checker.check(tu, rep, { allow_incomplete_params = true })
       collect(col, checked.tu, rep, opts.ignore_system_includes or false, allow)
    end

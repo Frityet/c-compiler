@@ -1,6 +1,7 @@
 local Span = require("util.span")
 local LexerFast = require("lexer.lexer")
 local types = require("sema.types")
+local ffi = require("ffi")
 
 local type Token = LexerFast.Token
 local type TypeNode = types.TypeNode
@@ -520,6 +521,7 @@ end
 local type DeclNode = VarDecl | FuncDecl | TypedefDecl | TagDecl
 
 local record TranslationUnit
+   src_ptr: ffi.CString
    decls: {DeclNode}
 end
 

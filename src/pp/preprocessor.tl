@@ -1,98 +1,365 @@
-local Span = require("util.span")
-local Diagnostic = require("diag.diagnostics")
+local ffi = require("ffi")
+local lexer = require("lexer.lexer")
 local Reporter = require("diag.reporter")
-local LexerFast = require("lexer.lexer")
-local Target = require("util.target")
+local Diagnostic = require("diag.diagnostics")
+local bit = require("bit")
 
-local type Token = LexerFast.Token
-local type TokenKindType = LexerFast.TokenKind
-local type TokenC = LexerFast.TokenC
-local type LexerState = LexerFast.LexerState
+-- local ffi_token_type = ffi.typeof("tl_token_fast")
+-- local ffi_token_array_type = ffi.typeof("tl_token_fast[?]")
+-- local ffi_token_ptr_type = ffi.typeof("tl_token_fast*")
 
-local TK_IDENTIFIER: TokenKindType = LexerFast.K_IDENTIFIER
-local TK_NUMBER: TokenKindType = LexerFast.K_NUMBER
-local TK_STRING: TokenKindType = LexerFast.K_STRING
-local TK_KEYWORD: TokenKindType = LexerFast.K_KEYWORD
-local TK_PUNCT: TokenKindType = LexerFast.K_PUNCT
-local TK_EOF: TokenKindType = LexerFast.K_EOF
-local K_EOF = LexerFast.K_EOF
+-- local type TokenPtr = ffi.Pointer<lexer.Token>
 
-local trigraphs: {string:string} = {
-   ["??="] = "#",
-   ["??/"] = "\\",
-   ["??'"] = "^",
-   ["??("] = "[",
-   ["??)"] = "]",
-   ["??!"] = "|",
-   ["??<"] = "{",
-   ["??>"] = "}",
-   ["??-"] = "~",
-}
-
-local record PreprocessFastResult
-   text: string
-   tokens: {Token}
-   file_id: integer
-   iterator: function(): Token
-end
-
-local record Macro
+local record MacroC
    name: string
    params: {string} | nil
    is_variadic: boolean
-   replacement: {Token}
+   replacement: ffi.Array<lexer.Token>
+   replacement_len: integer
    is_function: boolean
    built_in: string | nil
 end
 
-local record ConditionalState
-   skipping: boolean
-   branch_taken: boolean
-   in_else: boolean
+local record SourceManager
+   sources: {integer:string}
+   ptrs: {integer:ffi.Pointer<integer>} -- uint8_t*
+   paths: {integer:string}
+   infos: {integer: SourceInfo}
+   next_id: integer
 end
 
-local record State
-   macros: {string: Macro}
-   reporter: Reporter
-   search_paths: {string}
-   next_file_id: integer
-   current_dir: string
-   pragma_once: {string:boolean}
-   file_paths: {integer:string}
-   file_line_adjust: {integer: integer}
-   file_name_override: {integer: string}
+local record SourceInfo
+   path: string
+   line_delta: integer
 end
 
-local record FastConfig
+local record PPOptions
    search_paths: {string} | nil
+   system_paths: {string} | nil
    defines: {string:string} | nil
    undefs: {string:boolean} | nil
    current_dir: string | nil
    source_path: string | nil
-   no_system_paths: boolean | nil
-   strict_c99: boolean | nil
 end
 
-local function new_token(kind: TokenKindType, lexeme: string, span: Span, has_newline: boolean): Token
-   return {
-      kind = kind,
-      lexeme = lexeme,
-      span = span,
-      has_newline = has_newline,
+local last_file_id = -1
+local last_ptr: ffi.Pointer<integer> = nil
+
+local function get_lexeme(mgr: SourceManager, tok: lexer.Token): string
+   local ptr: ffi.Pointer<integer>
+   if tok.file_id == last_file_id and last_ptr then
+      ptr = last_ptr
+   else
+      ptr = mgr.ptrs[tok.file_id]
+      last_file_id = tok.file_id
+      last_ptr = ptr
+   end
+   if not ptr then return "" end
+   return ffi.string(ptr + tok.start, tok.stop - tok.start)
+end
+
+local function path_dir(path: string): string
+   local dir = path:match("^(.*)/[^/]+$") or "."
+   if dir == "" then
+      return "."
+   end
+   return dir
+end
+
+local function ensure_source_info(mgr: SourceManager, file_id: integer): SourceInfo
+   local info = mgr.infos[file_id]
+   if info is nil then
+      info = { path = mgr.paths[file_id] or "", line_delta = 0 }
+      mgr.infos[file_id] = info
+   end
+   return info
+end
+
+local function next_file_id(mgr: SourceManager): integer
+   local id = mgr.next_id
+   mgr.next_id = mgr.next_id + 1
+   return id
+end
+
+ffi.cdef[[
+    int memcmp(const void *s1, const void *s2, size_t n);
+
+    typedef struct MacroEntry {
+        const char* key;
+        int key_len;
+        int index; /* Index into Lua array (1-based) */
+        struct MacroEntry* next;
+    } MacroEntry;
+
+    typedef struct {
+        MacroEntry** buckets;
+        int size;
+        int count;
+    } MacroTable;
+]]
+
+local record MacroEntry is ffi.CData where ffi.istype(self, "MacroEntry")
+   key: ffi.CString
+   key_len: integer
+   index: integer
+   next: ffi.Pointer<MacroEntry> | nil
+end
+
+local record MacroTable is ffi.CData where ffi.istype(self, "MacroTable")
+   buckets: ffi.Array<ffi.Pointer<MacroEntry>> | nil
+   size: integer
+   count: integer
+end
+
+local function hash_bytes(ptr: ffi.Pointer<integer>, len: integer): integer
+    local h = 5381
+    local p: ffi.Pointer<integer> = ffi.cast("uint8_t*", ptr)
+    local limit = len
+    if limit > 16 then limit = 16 end
+    for i = 0, limit - 1 do
+        h = h * 33 + p[i]
+    end
+    return bit.bor(h, 0)
+end
+
+local function new_macro_table(size: integer, refs: {any}): MacroTable
+    local t: MacroTable = ffi.new("MacroTable")
+    t.size = size
+    local buckets: ffi.Array<ffi.Pointer<MacroEntry>> = ffi.new("MacroEntry*[?]", size)
+    t.buckets = buckets
+    t.count = 0
+    table.insert(refs, buckets)
+    return t
+end
+
+local function macro_table_get(t: MacroTable, ptr: ffi.Pointer<integer>, len: integer): integer
+    -- print("get", len)
+    local h = hash_bytes(ptr, len)
+    local idx = bit.band(h, t.size - 1)
+    local bck = t.buckets
+    if bck is nil then return 0 end
+    local entry = bck[idx]
+    while not entry is nil do
+        if entry[0].key_len == len and (ffi.C.memcmp as function(ffi.CData, ffi.CData, integer): integer)(entry[0].key, ptr, len) == 0 then
+            return entry[0].index
+        end
+        entry = entry[0].next
+    end
+    return 0
+end
+
+local function macro_table_put(t: MacroTable, key: string, index: integer, refs: {any}): MacroEntry
+   local len = #key
+   local h = hash_bytes(ffi.cast("uint8_t*", key), len)
+   local idx = bit.band(h, t.size - 1)
+    
+    -- Check if exists
+    local bck = t.buckets
+    if bck is nil then return nil end
+    local entry = bck[idx]
+    while not entry is nil do
+        if entry[0].key_len == len and (ffi.C.memcmp as function(ffi.CData, ffi.String, integer): integer)(entry[0].key, key, len) == 0 then
+            entry[0].index = index
+            return nil
+        end
+        entry = entry[0].next
+    end
+    
+    -- Add new
+    local new_entry: MacroEntry = ffi.new("MacroEntry")
+    local key_copy: ffi.CString = ffi.new("char[?]", len + 1)
+    ffi.copy(key_copy, key, len)
+    new_entry.key = key_copy
+    new_entry.key_len = len
+    new_entry.index = index
+    new_entry.next = bck[idx]
+    
+    -- Anchor objects
+    table.insert(refs, new_entry)
+    table.insert(refs, key_copy)
+    
+    -- We need to assign the pointer to the bucket.
+    bck[idx] = ffi.cast("MacroEntry*", new_entry)
+   t.count = t.count + 1
+   return new_entry
+end
+
+local function macro_table_delete(t: MacroTable, key: string)
+    local len = #key
+    local h = hash_bytes(ffi.cast("uint8_t*", key), len)
+    local idx = bit.band(h, t.size - 1)
+    local bck = t.buckets
+    if bck is nil then return end
+    local entry = bck[idx]
+    local prev: ffi.Pointer<MacroEntry> | nil = nil
+    while not entry is nil do
+        if entry[0].key_len == len and (ffi.C.memcmp as function(ffi.CData, ffi.String, integer): integer)(entry[0].key, key, len) == 0 then
+            if prev is nil then
+                bck[idx] = entry[0].next
+            else
+                prev[0].next = entry[0].next
+            end
+            return
+        end
+        prev = entry
+        entry = entry[0].next
+    end
+end
+
+local record CondFrame
+   parent_active: boolean
+   taken: boolean
+   else_seen: boolean
+end
+
+local record PPState
+   macros: {MacroC}
+   macro_table: MacroTable
+   macro_refs: {any}
+   mgr: SourceManager
+   reporter: Reporter
+   once_paths: {string:boolean}
+   cond_stack: {CondFrame}
+   active: boolean
+   expanding: {string:boolean}
+   opts: PPOptions
+   date_literal: string
+   time_literal: string
+end
+
+local record TokenSource
+   next: function(): lexer.Token
+   peek: function(): lexer.Token
+   is_file: boolean
+   lexer: lexer.LexerState | nil
+   mgr: SourceManager | nil
+   macro_name: string | nil
+end
+
+local TOKEN_SIZE<const> = ffi.sizeof("tl_token_fast")
+
+local function clone_token(tok: lexer.Token): lexer.Token
+   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[1]")
+   ffi.copy(arr, tok, TOKEN_SIZE)
+   return arr[0]
+end
+
+local function register_source(mgr: SourceManager, file_id: integer, src: string, path: string | nil)
+   mgr.sources[file_id] = src
+   mgr.ptrs[file_id] = ffi.cast("uint8_t*", ffi.cast("const uint8_t*", src))
+   mgr.paths[file_id] = path or mgr.paths[file_id] or ""
+   if mgr.infos[file_id] == nil then
+      mgr.infos[file_id] = { path = mgr.paths[file_id] or "", line_delta = 0 }
+   end
+end
+
+local function make_synthetic_token(mgr: SourceManager, lexeme: string, kind: integer): lexer.Token
+   local fid = next_file_id(mgr)
+   register_source(mgr, fid, lexeme, "<macro>")
+   local tok: lexer.Token = ffi.new("tl_token_fast")
+   tok.start = 0
+   tok.stop = #lexeme
+   tok.line = 1
+   tok.col = 1
+   tok.file_id = fid
+   tok.kind = kind
+   tok.flags = 0
+   return tok
+end
+
+local function lex_single_token(mgr: SourceManager, text: string): lexer.Token
+   local fid = next_file_id(mgr)
+   register_source(mgr, fid, text, "<macro>")
+   local lex = lexer.new_lexer(text, fid)
+   local tok = lexer.next_token(lex)
+   return clone_token(tok)
+end
+
+local function paste_tokens(left: lexer.Token, right: lexer.Token, mgr: SourceManager): lexer.Token
+   local l = get_lexeme(mgr, left)
+   local r = get_lexeme(mgr, right)
+   return lex_single_token(mgr, l .. r)
+end
+
+local function define_object_macro(state: PPState, name: string, tokens: {lexer.Token}, built_in?: string)
+   local len = #tokens
+   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", len > 0 and len or 1)
+   for i, t in ipairs(tokens) do
+      ffi.copy(arr + (i - 1), t, TOKEN_SIZE)
+   end
+   local macro: MacroC = {
+      name = name,
+      params = nil,
+      is_variadic = false,
+      replacement = arr,
+      replacement_len = len,
+      is_function = false,
+      built_in = built_in or nil,
    }
+   table.insert(state.macros, macro)
+   macro_table_put(state.macro_table, name, #state.macros, state.macro_refs)
 end
 
-local function make_token(lexer: LexerState, tc: TokenC): Token
-   return LexerFast.token_from_c(lexer, tc)
+local function is_macro_defined(state: PPState, name: string): boolean
+   return macro_table_get(state.macro_table, ffi.cast("const uint8_t*", name), #name) > 0
+end
+
+local function install_builtins(state: PPState)
+   define_object_macro(state, "__STDC__", { make_synthetic_token(state.mgr, "1", lexer.K_NUMBER) })
+   define_object_macro(state, "__STDC_VERSION__", { make_synthetic_token(state.mgr, "199901L", lexer.K_NUMBER) })
+   define_object_macro(state, "__FILE__", {}, "file")
+   define_object_macro(state, "__LINE__", {}, "line")
+   define_object_macro(state, "__DATE__", {}, "date")
+   define_object_macro(state, "__TIME__", {}, "time")
+end
+local function read_file(path: string): string | nil
+   local f = io.open(path, "rb")
+   if not f then return nil end
+   local content = f:read("*a")
+   f:close()
+   return content
+end
+
+local function resolve_include(path: string, is_angle: boolean, state: PPState, current_path: string): string | nil
+   local candidates: {string} = {}
+   local search_paths: {string}
+   if state.opts.search_paths then
+      search_paths = state.opts.search_paths
+   else
+      search_paths = {}
+   end
+   local system_paths: {string}
+   if state.opts.system_paths then
+      system_paths = state.opts.system_paths
+   else
+      system_paths = {}
+   end
+   if not is_angle then
+      candidates[#candidates + 1] = current_path ~= "" and (path_dir(current_path) .. "/" .. path) or path
+   end
+   for _, p in ipairs(search_paths) do
+      candidates[#candidates + 1] = p .. "/" .. path
+   end
+   for _, p in ipairs(system_paths) do
+      candidates[#candidates + 1] = p .. "/" .. path
+   end
+   for _, cand in ipairs(candidates) do
+      local f = io.open(cand, "r")
+      if f then
+         f:close()
+         return cand
+      end
+   end
+   return nil
 end
 
 local function replace_trigraphs(src: string): string
+   local trigraphs: {string:string} = {
+      ["??="] = "#", ["??/"] = "\\", ["??'"] = "^", ["??("] = "[", ["??)"] = "]",
+      ["??!"] = "|", ["??<"] = "{", ["??>"] = "}", ["??-"] = "~",
+   }
    return (src:gsub("%?%?.", function(seq: string): string
-      local rep = trigraphs[seq]
-      if rep then
-         return rep
-      end
-      return seq
+      return trigraphs[seq] or seq
    end))
 end
 
@@ -102,1179 +369,920 @@ local function normalize_newlines(src: string): string
    return src
 end
 
-local function splice_lines(src: string, rep: Reporter, file_id: integer): string
-   local removed = 0
-   local spliced = src:gsub("\\\r?\n", function(): string
-      removed = removed + 1
-      return ""
-   end)
-   if removed > 0 then
-      local span = Span.new(file_id, 0, 0, 1, 1)
-      rep:report(Diagnostic.new("note", string.format("removed %d line splice(s)", removed), span, "PP001"))
-   end
-   return spliced
+local function splice_lines(src: string): string
+   return (src:gsub("\\\n", ""))
 end
 
-
-local function lex_tokens(src: string, file_id: integer): {Token}
-   local lexer = LexerFast.new_lexer(src, file_id)
-   local tokens: {Token} = {}
-   while true do
-      local tc = LexerFast.next_token(lexer)
-      local tok = make_token(lexer, tc)
-      tokens[#tokens + 1] = tok
-      if tok.kind == TK_EOF then
-         break
+local function new_lexer_source(src: string, file_id: integer, mgr: SourceManager, path?: string): TokenSource
+   src = replace_trigraphs(src)
+   src = normalize_newlines(src)
+   src = splice_lines(src)
+   register_source(mgr, file_id, src, path)
+   
+   local lex = lexer.new_lexer(src, file_id)
+   local buffer_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[1]")
+   local has_buffer = false
+   
+   local function peek(): lexer.Token
+      if has_buffer then
+         return buffer_arr[0]
       end
+      local t = lexer.next_token(lex)
+      ffi.copy(buffer_arr, t, ffi.sizeof("tl_token_fast"))
+      has_buffer = true
+      return buffer_arr[0]
    end
-   return tokens
+
+   local function next_token(): lexer.Token
+      if has_buffer then
+         has_buffer = false
+         return buffer_arr[0]
+      end
+      return lexer.next_token(lex)
+   end
+   
+   return {
+      next = next_token,
+      peek = peek,
+      is_file = true,
+      lexer = lex,
+      mgr = mgr,
+   }
 end
 
-local function text_from_tokens(tokens: {Token}): string
+
+local record TokenVector
+   data: ffi.Array<lexer.Token> -- tl_token_fast[]
+   size: integer
+   capacity: integer
+end
+
+local function new_token_vector(capacity?: integer): TokenVector
+   capacity = capacity or 16
+   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", capacity)
+   return {
+      data = arr,
+      size = 0,
+      capacity = capacity
+   }
+end
+
+local function vec_push(vec: TokenVector, tok: lexer.Token)
+   if vec.size >= vec.capacity then
+      local new_cap = vec.capacity * 2
+      local new_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", new_cap)
+      ffi.copy(new_arr, vec.data, vec.size * ffi.sizeof("tl_token_fast"))
+      vec.data = new_arr
+      vec.capacity = new_cap
+   end
+   -- Copy token content
+   ffi.copy(vec.data + vec.size, tok, ffi.sizeof("tl_token_fast"))
+   vec.size = vec.size + 1
+end
+
+local function stringify_arg(arg_vec: TokenVector, mgr: SourceManager): lexer.Token
    local parts: {string} = {}
-   for i, t in ipairs(tokens) do
-      if t.kind == TK_EOF then
-         break
-      end
-      parts[#parts + 1] = t.lexeme
-      local next_tok = tokens[i + 1]
-      if next_tok and next_tok.kind ~= TK_PUNCT and t.kind ~= TK_PUNCT then
-         parts[#parts + 1] = " "
-      elseif next_tok and t.kind == TK_IDENTIFIER and next_tok.kind == TK_IDENTIFIER then
-         parts[#parts + 1] = " "
-      end
+   local ptr = arg_vec.data
+   for i = 0, arg_vec.size - 1 do
+      parts[#parts + 1] = get_lexeme(mgr, ptr[i])
    end
-   return table.concat(parts)
+   local joined = table.concat(parts, " ")
+   joined = joined:gsub("\\", "\\\\")
+   joined = joined:gsub("\"", "\\\"")
+   local lexeme = "\"" .. joined .. "\""
+   return make_synthetic_token(mgr, lexeme, lexer.K_STRING)
 end
 
-local function path_dir(path: string): string
-   local dir = path:match("^(.*)/[^/]+$") or "."
-   return dir
-end
-
-local function define_object_macro(state: State, name: string, replacement: {Token})
-   state.macros[name] = {
-      name = name,
-      params = nil,
-      is_variadic = false,
-      replacement = replacement,
-      is_function = false,
-      built_in = nil,
-   }
-end
-
-local function define_function_macro(state: State, name: string, params: {string}, is_variadic: boolean, replacement: {Token})
-   state.macros[name] = {
-      name = name,
-      params = params,
-      is_variadic = is_variadic,
-      replacement = replacement,
-      is_function = true,
-      built_in = nil,
-   }
-end
-
-local function add_builtin_macros(state: State, file_id: integer, macro_values: {string:string})
-   for name, body in pairs(macro_values) do
-      local toks = lex_tokens(body, file_id)
-      define_object_macro(state, name, toks)
-   end
-
-   state.macros["__FILE__"] = {
-      name = "__FILE__",
-      params = nil,
-      is_variadic = false,
-      replacement = {},
-      is_function = false,
-      built_in = "__FILE__",
-   }
-   state.macros["__LINE__"] = {
-      name = "__LINE__",
-      params = nil,
-      is_variadic = false,
-      replacement = {},
-      is_function = false,
-      built_in = "__LINE__",
-   }
-   state.macros["__DATE__"] = {
-      name = "__DATE__",
-      params = nil,
-      is_variadic = false,
-      replacement = {},
-      is_function = false,
-      built_in = "__DATE__",
-   }
-   state.macros["__TIME__"] = {
-      name = "__TIME__",
-      params = nil,
-      is_variadic = false,
-      replacement = {},
-      is_function = false,
-      built_in = "__TIME__",
-   }
-end
-
-local function make_state(reporter: Reporter, config: FastConfig, file_id: integer): State
-   local base_dir = config.current_dir or (config.source_path and path_dir(config.source_path)) or "."
-   local target = Target.detect()
-   local search_paths: {string} = {}
-   local seen: {string:boolean} = {}
-   local function add_path(p: string | nil)
-      if p is nil or p == "" then
-         return
+local function new_vector_source(vec: TokenVector, macro_name: string | nil): TokenSource
+   local idx = 0
+   local len = vec.size
+   local ptr = vec.data
+   local function next_token(): lexer.Token
+      if idx >= len then
+         local eof: lexer.Token = ffi.new("tl_token_fast")
+         eof.kind = lexer.K_EOF
+         return eof
       end
-      if not seen[p] then
-         search_paths[#search_paths + 1] = p
-         seen[p] = true
-      end
-   end
-
-   add_path(base_dir)
-   local cfg_paths = config.search_paths
-   if not cfg_paths is nil then
-      local arr = cfg_paths
-      for i = 1, #arr do
-         add_path(arr[i])
-      end
-   end
-   if not config.no_system_paths then
-      local sys_paths = Target.default_include_paths(target)
-      for _, p in ipairs(sys_paths) do
-         add_path(p)
-      end
-   end
-
-   local st: State = {
-      macros = {},
-      reporter = reporter,
-      search_paths = search_paths,
-      next_file_id = file_id + 1,
-      current_dir = base_dir,
-      pragma_once = {},
-      file_paths = {},
-      file_line_adjust = {},
-      file_name_override = {},
-   }
-
-   local want_extensions = not (config.strict_c99 or true)
-   local function tokens_from_body(body: string): {Token}
-      local toks = lex_tokens(body, file_id)
-      if #toks > 0 and toks[#toks].kind == TK_EOF then
-         toks[#toks] = nil
-      end
-      return toks
-   end
-
-   add_builtin_macros(st, file_id, Target.default_defines(target, want_extensions))
-
-   local function def_obj(name: string, body: string)
-      define_object_macro(st, name, tokens_from_body(body))
-   end
-
-   def_obj("__restrict", "restrict")
-   def_obj("__restrict__", "restrict")
-   def_obj("__extension__", "")
-   def_obj("__inline", "inline")
-   def_obj("__inline__", "inline")
-   def_obj("__asm", "")
-   def_obj("__asm__", "")
-   def_obj("__volatile", "volatile")
-   def_obj("__volatile__", "volatile")
-   def_obj("__signed__", "signed")
-   def_obj("__const__", "const")
-   def_obj("__THROW", "")
-   def_obj("__THROWNL", "")
-   def_obj("__wur", "")
-   def_obj("__attribute_deprecated__", "")
-   def_obj("__NTH", "")
-   -- def_obj("__builtin_va_list", "void *")
-   -- def_obj("__gnuc_va_list", "__builtin_va_list")
-
-   define_function_macro(st, "__builtin_expect", { "x", "y" }, false, tokens_from_body("(x)"))
-   define_function_macro(st, "__builtin_constant_p", { "x" }, false, tokens_from_body("0"))
-
-   if config.defines then
-      local defs = config.defines as {string:string}
-      for name, body in pairs(defs) do
-         local toks = lex_tokens(body, file_id)
-         define_object_macro(st, name, toks)
-      end
-   end
-   if config.undefs then
-      local undefs_tbl = config.undefs as {string:boolean}
-      for name, _ in pairs(undefs_tbl) do
-         st.macros[name] = nil
-      end
-   end
-
-   return st
-end
-
-local function clone_token(t: Token): Token
-   return new_token(t.kind, t.lexeme, t.span, t.has_newline)
-end
-
-local function stringize(argument_tokens: {Token}, span: Span): Token
-   local pieces: {string} = {}
-   for i, tok in ipairs(argument_tokens) do
-      pieces[#pieces + 1] = tok.lexeme
-      if i < #argument_tokens then
-         pieces[#pieces + 1] = " "
-      end
-   end
-   local content = table.concat(pieces)
-   local escaped = content:gsub("\\", "\\\\"):gsub("\"", "\\\"")
-   local lexeme = "\"" .. escaped .. "\""
-   return new_token(TK_STRING, lexeme, span, false)
-end
-
-local function lex_single_token(src: string, file_id: integer): Token | nil
-   local lexer = LexerFast.new_lexer(src, file_id)
-   local tc = LexerFast.next_token(lexer)
-   if tc.kind == K_EOF then
-      return nil
-   end
-   return make_token(lexer, tc)
-end
-
-local function token_paste(lhs: Token | nil, rhs: Token | nil, file_id: integer): {Token}
-   if lhs is nil and rhs is nil then
-     return {}
-   end
-   if lhs is nil then
-      return { rhs }
-   end
-   if rhs is nil then
-      return { lhs }
-   end
-   local combined = lhs.lexeme .. rhs.lexeme
-   local tok = lex_single_token(combined, file_id)
-   if tok == nil then
-      return {}
-   end
-   return { tok }
-end
-
-local function substitute_macro(macro: Macro, call_span: Span, args: {{Token}}, state: State): {Token}
-   local _ = state
-   local out: {Token} = {}
-   local params: {string} = (macro.params or {}) as {string}
-   local arg_map: {string:{Token}} = {}
-   if macro.is_function then
-      for i, p in ipairs(params) do
-         arg_map[p] = args[i] or {}
-      end
-      if macro.is_variadic then
-         arg_map["__VA_ARGS__"] = args[#args] or {}
-      end
-   end
-
-   local i = 1
-   while i <= #macro.replacement do
-      local tok = macro.replacement[i]
-      if tok.lexeme == "#" and macro.is_function then
-         local next_tok = macro.replacement[i + 1]
-         if next_tok and next_tok.kind == TK_IDENTIFIER and arg_map[next_tok.lexeme] then
-            local arg_tokens = arg_map[next_tok.lexeme]
-            out[#out + 1] = stringize(arg_tokens, call_span)
-            i = i + 2
-         else
-            out[#out + 1] = clone_token(tok)
-            i = i + 1
-         end
-      elseif tok.lexeme == "##" then
-         local lhs = out[#out]
-         local rhs = macro.replacement[i + 1]
-         if out[#out] then
-            out[#out] = nil
-         end
-         local rhs_tok: Token | nil = nil
-         if rhs and rhs.kind == TK_IDENTIFIER and arg_map[rhs.lexeme] then
-            local arg_tokens = arg_map[rhs.lexeme]
-            if #arg_tokens > 0 then
-               rhs_tok = arg_tokens[1]
-            end
-         elseif rhs then
-            rhs_tok = rhs
-         end
-         local pasted = token_paste(lhs, rhs_tok, call_span.file_id)
-         for _, pt in ipairs(pasted) do
-            out[#out + 1] = pt
-         end
-         i = i + 2
-      elseif tok.kind == TK_IDENTIFIER and arg_map[tok.lexeme] then
-         local arg_tokens = arg_map[tok.lexeme]
-         for _, atok in ipairs(arg_tokens) do
-            out[#out + 1] = clone_token(atok)
-         end
-         i = i + 1
-      elseif tok.kind == TK_IDENTIFIER and tok.lexeme == "__VA_ARGS__" and macro.is_variadic then
-         local arg_tokens = arg_map["__VA_ARGS__"] or {}
-         for _, atok in ipairs(arg_tokens) do
-            out[#out + 1] = clone_token(atok)
-         end
-         i = i + 1
-      elseif tok.kind == TK_IDENTIFIER and tok.lexeme == "__FILE__" and macro.built_in == nil then
-         out[#out + 1] = new_token(TK_STRING, "\"" .. tostring(call_span.file_id) .. "\"", call_span, false)
-         i = i + 1
-      elseif tok.kind == TK_IDENTIFIER and tok.lexeme == "__LINE__" and macro.built_in == nil then
-         out[#out + 1] = new_token(TK_NUMBER, tostring(call_span.line), call_span, false)
-         i = i + 1
-      else
-         out[#out + 1] = clone_token(tok)
-         i = i + 1
-      end
-   end
-
-   return out
-end
-
-local function parse_macro_args(tokens: {Token}, idx: integer): {{Token}}, integer
-   local args: {{Token}} = {}
-   local depth = 0
-   local current: {Token} = {}
-   idx = idx + 1 -- skip '('
-   while idx <= #tokens do
-      local t = tokens[idx]
-      if t.kind == TK_PUNCT and t.lexeme == "(" then
-         depth = depth + 1
-         current[#current + 1] = t
-      elseif t.kind == TK_PUNCT and t.lexeme == ")" then
-         if depth == 0 then
-            args[#args + 1] = current
-            return args, idx
-         else
-            depth = depth - 1
-            current[#current + 1] = t
-         end
-      elseif t.kind == TK_PUNCT and t.lexeme == "," and depth == 0 then
-         args[#args + 1] = current
-         current = {}
-      else
-         current[#current + 1] = t
-      end
-      idx = idx + 1
-   end
-   return args, idx
-end
-
-local function expand_macros(tokens: {Token}, state: State, expanding?: {string:boolean}, skip?: {string:boolean}): {Token}
-   local active = expanding or {}
-   local out: {Token} = {}
-   local i = 1
-   local function append_tokens(ts: {Token})
-      for _, et in ipairs(ts) do
-         out[#out + 1] = et
-      end
-   end
-
-   while i <= #tokens do
-      local t = tokens[i]
-      if t.kind == TK_IDENTIFIER and not (skip and skip[t.lexeme]) then
-         local macro = state.macros[t.lexeme]
-         if macro and not active[t.lexeme] then
-            active[t.lexeme] = true
-            if macro.is_function then
-               local next_tok = tokens[i + 1]
-               if next_tok and next_tok.kind == TK_PUNCT and next_tok.lexeme == "(" then
-                  local args, end_idx = parse_macro_args(tokens, i + 1)
-                  local expanded = substitute_macro(macro, t.span, args, state)
-                  local rec = expand_macros(expanded, state, active, skip)
-                  append_tokens(rec)
-                  i = end_idx + 1
-               else
-                  out[#out + 1] = t
-                  i = i + 1
-               end
-            else
-               local rep = macro.replacement
-               if macro.built_in == "__FILE__" then
-                  local override = state.file_name_override[t.span.file_id]
-                  local path = override or state.file_paths[t.span.file_id]
-                  local value = path or tostring(t.span.file_id)
-                  rep = { new_token(TK_STRING, string.format("%q", value), t.span, false) }
-               elseif macro.built_in == "__LINE__" then
-                  local adj = state.file_line_adjust[t.span.file_id] or 0
-                  rep = { new_token(TK_NUMBER, tostring(t.span.line + adj), t.span, false) }
-               elseif macro.built_in == "__DATE__" then
-                  rep = { new_token(TK_STRING, os.date("\"%b %d %Y\""), t.span, false) }
-               elseif macro.built_in == "__TIME__" then
-                  rep = { new_token(TK_STRING, os.date("\"%H:%M:%S\""), t.span, false) }
-               end
-               local cloned: {Token} = {}
-               for _, rt in ipairs(rep) do
-                  cloned[#cloned + 1] = clone_token(rt)
-               end
-               local rec = expand_macros(cloned, state, active, skip)
-               append_tokens(rec)
-               i = i + 1
-            end
-            active[t.lexeme] = nil
-         else
-            out[#out + 1] = t
-            i = i + 1
-         end
-      else
-         out[#out + 1] = t
-         i = i + 1
-      end
-   end
-   return out
-end
-
-local function parse_define(tokens: {Token}, state: State)
-   if #tokens == 0 then
-      return
-   end
-   local name_tok = tokens[1]
-   if name_tok.kind ~= TK_IDENTIFIER then
-      return
-   end
-   local idx = 2
-   local is_function = false
-   local params: {string} = {}
-   local is_variadic = false
-   local next_tok = tokens[idx]
-   local is_adjacent = false
-   if next_tok then
-      local ns = next_tok.span
-      local ms = name_tok.span
-      is_adjacent = ns.file_id == ms.file_id and ns.start_offset == ms.end_offset
-   end
-   if next_tok and next_tok.kind == TK_PUNCT and next_tok.lexeme == "(" and is_adjacent then
-      is_function = true
-      idx = idx + 1
-      while idx <= #tokens do
-         local t = tokens[idx]
-         if t.kind == TK_PUNCT and t.lexeme == ")" then
-            idx = idx + 1
-            break
-         elseif t.kind == TK_PUNCT and t.lexeme == "," then
-            idx = idx + 1
-         elseif t.kind == TK_PUNCT and t.lexeme == "..." then
-            is_variadic = true
-            params[#params + 1] = "__VA_ARGS__"
-            idx = idx + 1
-            if tokens[idx] and tokens[idx].kind == TK_PUNCT and tokens[idx].lexeme == ")" then
-               idx = idx + 1
-            end
-            break
-         elseif t.kind == TK_IDENTIFIER then
-            params[#params + 1] = t.lexeme
-            idx = idx + 1
-         else
-            idx = idx + 1
-         end
-      end
-   end
-
-   local replacement: {Token} = {}
-   while idx <= #tokens do
-      replacement[#replacement + 1] = tokens[idx]
-      idx = idx + 1
-   end
-
-   if is_function then
-      define_function_macro(state, name_tok.lexeme, params, is_variadic, replacement)
-   else
-      define_object_macro(state, name_tok.lexeme, replacement)
-   end
-end
-
-local function parse_if_expr(tokens: {Token}, state: State): boolean
-   local skip: {string:boolean} = {}
-   for i = 1, #tokens do
-      local t = tokens[i]
-      if t.kind == TK_IDENTIFIER and t.lexeme == "defined" then
-         local nxt = tokens[i + 1]
-         if nxt and nxt.kind == TK_IDENTIFIER then
-            skip[nxt.lexeme] = true
-         elseif nxt and nxt.kind == TK_PUNCT and nxt.lexeme == "(" then
-            local idtok = tokens[i + 2]
-            if idtok and idtok.kind == TK_IDENTIFIER then
-               skip[idtok.lexeme] = true
-            end
-         end
-      end
-   end
-
-   local expanded = expand_macros(tokens, state, nil, skip)
-   local idx = 1
-   local expr: function(): integer
-
-   local function peek(): Token | nil
-      return expanded[idx]
-   end
-
-   local function advance(): Token | nil
-      local t = expanded[idx]
+      local t = ptr[idx]
       idx = idx + 1
       return t
    end
+   local function peek(): lexer.Token
+      if idx >= len then
+         local eof: lexer.Token = ffi.new("tl_token_fast")
+         eof.kind = lexer.K_EOF
+         return eof
+      end
+      return ptr[idx]
+   end
+   return { next = next_token, peek = peek, is_file = false, lexer = nil, mgr = nil, macro_name = macro_name }
+end
 
-   local function primary(): integer
-      local t = peek()
-      if not t then return 0 end
-      local tok: Token = t
-      if tok.kind == TK_NUMBER then
-         advance()
-         local num = tonumber(tok.lexeme)
-         if num is nil then return 0 end
-         return math.floor(num)
-      elseif tok.kind == TK_IDENTIFIER then
-         if tok.lexeme == "defined" then
-            advance()
-            local next_tok = peek()
-            if next_tok then
-               local nt: Token = next_tok
-               if nt.kind == TK_IDENTIFIER then
-                  advance()
-                  return state.macros[nt.lexeme] and 1 or 0
-               elseif nt.kind == TK_PUNCT and nt.lexeme == "(" then
-                  advance()
-                  local id_tok = peek()
-                  local val = 0
-                  if id_tok then
-                     local it: Token = id_tok
-                     if it.kind == TK_IDENTIFIER then
-                        val = state.macros[it.lexeme] and 1 or 0
-                        advance()
-                     end
-                  end
-                  local closing = peek()
-                  if closing then
-                     local c: Token = closing
-                     if c.kind == TK_PUNCT and c.lexeme == ")" then
-                        advance()
-                     end
-                  end
-                  return val
-               else
-                  return 0
+
+
+local function parse_define(tokens: TokenVector, state: PPState)
+   if tokens.size == 0 then return end
+   
+   local ptr = tokens.data
+   local name_tok = ptr[0]
+   if name_tok.kind ~= lexer.K_IDENTIFIER then return end
+   
+   local name = get_lexeme(state.mgr, name_tok)
+   
+   local is_function = false
+   local params: {string} | nil = nil
+   local is_variadic = false
+   local replacement_start = 1
+   
+   if tokens.size > 1 then
+      local next_tok = ptr[1]
+      -- Check adjacency: start of next must equal stop of name
+      if next_tok.kind == lexer.K_PUNCT and get_lexeme(state.mgr, next_tok) == "(" and
+         next_tok.start == name_tok.stop then
+         is_function = true
+         params = {}
+         replacement_start = 2
+         
+         local i = 2
+         while i < tokens.size do
+            local t = ptr[i]
+            if t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == ")" then
+               replacement_start = i + 1
+               break
+            elseif t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == "," then
+               i = i + 1
+            elseif t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == "..." then
+               is_variadic = true
+               params[#params + 1] = "__VA_ARGS__"
+               i = i + 1
+            elseif t.kind == lexer.K_IDENTIFIER then
+               params[#params + 1] = get_lexeme(state.mgr, t)
+               i = i + 1
+            else
+               i = i + 1
+            end
+         end
+      end
+   end
+   
+   -- Create replacement array
+   local rep_len = tokens.size - replacement_start
+   local rep_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", rep_len > 0 and rep_len or 1)
+   if rep_len > 0 then
+      ffi.copy(rep_arr, ptr + replacement_start, rep_len * ffi.sizeof("tl_token_fast"))
+   end
+   
+   local macro: MacroC = {
+      name = name,
+      params = params,
+      is_variadic = is_variadic,
+      replacement = rep_arr,
+      replacement_len = rep_len,
+      is_function = is_function,
+      built_in = nil
+   }
+   
+   table.insert(state.macros, macro)
+   macro_table_put(state.macro_table, name, #state.macros, state.macro_refs)
+end
+
+local function parse_macro_args(source: TokenSource, mgr: SourceManager): {TokenVector}
+   local args: {TokenVector} = {}
+   local depth = 0
+   local current = new_token_vector()
+
+   local first = source.peek()
+   if first.kind == lexer.K_PUNCT and get_lexeme(mgr, first) == "(" then
+      source.next()
+      depth = 1
+   end
+
+   while true do
+      local t = source.peek()
+      if t.kind == lexer.K_EOF then
+         break
+      end
+
+      local lx = get_lexeme(mgr, t)
+      if t.kind == lexer.K_PUNCT then
+         if lx == "(" then
+            depth = depth + 1
+            vec_push(current, t)
+            source.next()
+         elseif lx == ")" then
+            depth = depth - 1
+            if depth == 0 then
+               source.next()
+               args[#args + 1] = current
+               break
+            else
+               vec_push(current, t)
+               source.next()
+            end
+         elseif lx == "," and depth == 1 then
+            source.next()
+            args[#args + 1] = current
+            current = new_token_vector()
+         else
+            vec_push(current, t)
+            source.next()
+         end
+      else
+         vec_push(current, t)
+         source.next()
+      end
+   end
+
+   return args
+end
+
+local function substitute_macro(macro: MacroC, args: {TokenVector}, state: PPState): TokenVector
+   local out = new_token_vector()
+   local rep = macro.replacement
+   local len = macro.replacement_len
+   local mgr = state.mgr
+   
+   local arg_map: {string: TokenVector} = {}
+   local params = macro.params
+   if not params is nil then
+      for i, param in ipairs(params) do
+         if args[i] then
+            arg_map[param] = args[i]
+         end
+      end
+   end
+   
+   if macro.is_variadic then
+      local va_args = new_token_vector()
+      local start_idx = macro.params and #macro.params or 1
+      for j = start_idx, #args do
+          local arg_v = args[j]
+          if j > start_idx then
+              -- TODO: Insert comma
+          end
+          local arg_ptr = arg_v.data
+          for k = 0, arg_v.size - 1 do
+              vec_push(va_args, arg_ptr[k])
+          end
+      end
+      arg_map["__VA_ARGS__"] = va_args
+   end
+
+   local i = 0
+   while i < len do
+      local tok = rep[i]
+      local lx = get_lexeme(mgr, tok)
+      if lx == "#" and macro.is_function and i + 1 < len then
+         local nxt = rep[i + 1]
+         if nxt.kind == lexer.K_IDENTIFIER then
+            local name = get_lexeme(mgr, nxt)
+            local arg_vec = arg_map[name]
+            if arg_vec then
+               vec_push(out, stringify_arg(arg_vec, mgr))
+               i = i + 2
+               goto continue
+            end
+         end
+      elseif lx == "##" then
+         local next_idx = i + 1
+         if next_idx < len and out.size > 0 then
+            local right_tok = rep[next_idx]
+            local right_lx = get_lexeme(mgr, right_tok)
+            local right_tokens = (right_tok.kind == lexer.K_IDENTIFIER) and arg_map[right_lx] or nil
+            local right_token: lexer.Token
+            local remaining: TokenVector | nil = nil
+            if not right_tokens is nil then
+               right_token = right_tokens.data[0]
+               remaining = right_tokens
+            else
+               right_token = right_tok
+            end
+            local left_tok = out.data[out.size - 1]
+            out.size = out.size - 1
+            vec_push(out, paste_tokens(left_tok, right_token, mgr))
+            if not remaining is nil then
+               for k = 1, remaining.size - 1 do
+                  vec_push(out, remaining.data[k])
                end
             end
-            return 0
-         else
-            advance()
-            return 0
+            i = i + 2
+            goto continue
          end
-      elseif tok.kind == TK_PUNCT and tok.lexeme == "(" then
-         advance()
-         local v = expr()
-         local closing = peek()
-         if closing then
-            local c: Token = closing
-            if c.kind == TK_PUNCT and c.lexeme == ")" then
-               advance()
+      end
+
+      if tok.kind == lexer.K_IDENTIFIER then
+         local name = lx
+         local arg_vec = arg_map[name]
+         if arg_vec then
+            local arg_ptr = arg_vec.data
+            for k = 0, arg_vec.size - 1 do
+               vec_push(out, arg_ptr[k])
+            end
+         else
+            vec_push(out, tok)
+         end
+      else
+         vec_push(out, tok)
+      end
+      i = i + 1
+      ::continue::
+   end
+
+   return out
+end
+
+local function expand_builtin(macro: MacroC, tok: lexer.Token, state: PPState): TokenVector
+   local out = new_token_vector()
+   local mgr = state.mgr
+   local info = ensure_source_info(mgr, tok.file_id)
+   if macro.built_in == "line" then
+      local ln = tok.line + info.line_delta
+      vec_push(out, make_synthetic_token(mgr, tostring(ln), lexer.K_NUMBER))
+   elseif macro.built_in == "file" then
+      local p = info.path ~= "" and info.path or (mgr.paths[tok.file_id] or "")
+      local escaped = p:gsub("\\", "\\\\"):gsub("\"", "\\\"")
+      vec_push(out, make_synthetic_token(mgr, "\"" .. escaped .. "\"", lexer.K_STRING))
+   elseif macro.built_in == "date" then
+      vec_push(out, make_synthetic_token(mgr, "\"" .. state.date_literal .. "\"", lexer.K_STRING))
+   elseif macro.built_in == "time" then
+      vec_push(out, make_synthetic_token(mgr, "\"" .. state.time_literal .. "\"", lexer.K_STRING))
+   end
+   return out
+end
+
+local function parse_int_literal(text: string): integer
+   local core = text:gsub("[uUlLfF]+$", "")
+   if core:match("^0[xX]") then
+      return (tonumber(core, 16) or 0) as integer
+   end
+   if core:match("^0[0-7]+") then
+      local value: integer = 0
+      for c in core:gmatch(".") do
+         if c == "0" then
+            value = value * 8
+         else
+            local digit = tonumber(c)
+            if digit then
+               value = (value * 8 + digit) as integer
             end
          end
-         return v
       end
-      advance()
+      return value
+   end
+   return (tonumber(core) or 0) as integer
+end
+
+local function parse_char_literal(text: string): integer
+   local inner = text:match("^'(.*)'$")
+   if inner is nil then
       return 0
    end
+   if inner:sub(1, 1) == "\\" then
+      local esc = inner:sub(2, 2)
+      if esc == "n" then return 10 end
+      if esc == "t" then return 9 end
+      if esc == "r" then return 13 end
+      if esc == "\\" then return 92 end
+      if esc == "'" then return 39 end
+      return tonumber(inner:sub(3), 8) or 0
+   end
+   return string.byte(inner) or 0
+end
 
-   local function unary(): integer
-      local t = peek()
-      if t then
-         local tok: Token = t
-         if tok.kind == TK_PUNCT and (tok.lexeme == "!" or tok.lexeme == "-" or tok.lexeme == "+") then
+local function eval_defined(name: string, state: PPState): integer
+   return is_macro_defined(state, name) and 1 or 0
+end
+
+local binary_prec: {string: integer} = {
+   ["||"] = 1,
+   ["&&"] = 2,
+   ["|"] = 3,
+   ["^"] = 4,
+   ["&"] = 5,
+   ["=="] = 6, ["!="] = 6,
+   ["<"] = 7, [">"] = 7, ["<="] = 7, [">="] = 7,
+   ["<<"] = 8, [">>"] = 8,
+   ["+"] = 9, ["-"] = 9,
+   ["*"] = 10, ["/"] = 10, ["%"] = 10,
+}
+
+local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
+   local mgr = state.mgr
+   local idx = 1
+
+   local function cur_lx(): string
+      local t = tokens[idx]
+      return t and get_lexeme(mgr, t) or ""
+   end
+
+   local function cur_token(): lexer.Token | nil
+      return tokens[idx]
+   end
+
+   local function advance()
+      idx = idx + 1
+   end
+
+   local parse_expression: function(integer): integer
+
+   local function parse_primary(): integer
+      local t = cur_token()
+      if t is nil then return 0 end
+      local lx = cur_lx()
+      if lx == "defined" then
+         advance()
+         local next_tok = cur_token()
+         local name_tok: lexer.Token | nil = nil
+         if next_tok and get_lexeme(mgr, next_tok) == "(" then
             advance()
-            local v = unary()
-            if tok.lexeme == "!" then return (v == 0) and 1 or 0 end
-            if tok.lexeme == "-" then return -v end
-            return v
-         end
-      end
-      return primary()
-   end
-
-   local function mul(): integer
-      local v = unary()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT then break end
-         local op = tok.lexeme
-         if op ~= "*" and op ~= "/" and op ~= "%" then break end
-         advance()
-         local rhs = unary()
-         if op == "*" then v = v * rhs
-         elseif op == "/" then v = rhs ~= 0 and math.floor(v / rhs) or 0
-         else v = rhs ~= 0 and v % rhs or 0 end
-      end
-      return v
-   end
-
-   local function add(): integer
-      local v = mul()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT then break end
-         local op = tok.lexeme
-         if op ~= "+" and op ~= "-" then break end
-         advance()
-         local rhs = mul()
-         if op == "+" then v = v + rhs else v = v - rhs end
-      end
-      return v
-   end
-
-   local function shift(): integer
-      local v = add()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT then break end
-         local op = tok.lexeme
-         if op ~= "<<" and op ~= ">>" then break end
-         advance()
-         local rhs = add()
-         if op == "<<" then
-            v = v << rhs
+            name_tok = cur_token()
+            advance()
+            if cur_token() and get_lexeme(mgr, cur_token() as lexer.Token) == ")" then
+               advance()
+            end
          else
-            v = v >> rhs
+            name_tok = next_tok
+            advance()
          end
-      end
-      return v
-   end
-
-   local function rel(): integer
-      local v = shift()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT then break end
-         local op = tok.lexeme
-         if op ~= "<" and op ~= ">" and op ~= "<=" and op ~= ">=" then break end
-         advance()
-         local rhs = shift()
-         if op == "<" then v = (v < rhs) and 1 or 0
-         elseif op == ">" then v = (v > rhs) and 1 or 0
-         elseif op == "<=" then v = (v <= rhs) and 1 or 0
-         else v = (v >= rhs) and 1 or 0 end
-      end
-      return v
-   end
-
-   local function eq(): integer
-      local v = rel()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT then break end
-         local op = tok.lexeme
-         if op ~= "==" and op ~= "!=" then break end
-         advance()
-         local rhs = rel()
-         if op == "==" then v = (v == rhs) and 1 or 0 else v = (v ~= rhs) and 1 or 0 end
-      end
-      return v
-   end
-
-   local function band_node(): integer
-      local v = eq()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT or tok.lexeme ~= "&" then break end
-         advance()
-         local rhs = eq()
-         v = v & rhs
-      end
-      return v
-   end
-
-   local function bxor(): integer
-      local v = band_node()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT or tok.lexeme ~= "^" then break end
-         advance()
-         local rhs = band_node()
-         v = v ~ rhs
-      end
-      return v
-   end
-
-   local function bor(): integer
-      local v = bxor()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT or tok.lexeme ~= "|" then break end
-         advance()
-         local rhs = bxor()
-         v = v | rhs
-      end
-      return v
-   end
-
-   local function land(): integer
-      local v = bor()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT or tok.lexeme ~= "&&" then break end
-         advance()
-         local rhs = bor()
-         v = (v ~= 0 and rhs ~= 0) and 1 or 0
-      end
-      return v
-   end
-
-   local function lor(): integer
-      local v = land()
-      while true do
-         local t = peek()
-         if not t then break end
-         local tok: Token = t
-         if tok.kind ~= TK_PUNCT or tok.lexeme ~= "||" then break end
-         advance()
-         local rhs = land()
-         v = (v ~= 0 or rhs ~= 0) and 1 or 0
-      end
-      return v
-   end
-   expr = lor
-   return expr() ~= 0
-end
-
-local function read_file(path: string): string | nil, string | nil
-   local fh, err = io.open(path, "r")
-   if not fh then
-      return nil, err
-   end
-   local data = fh:read("*a")
-   fh:close()
-   return data, nil
-end
-
-local function find_include(path: string, state: State, is_system: boolean): string | nil
-   local try_paths: {string} = {}
-   if not is_system then
-      try_paths[#try_paths + 1] = state.current_dir
-   end
-   for _, p in ipairs(state.search_paths) do
-      try_paths[#try_paths + 1] = p
-   end
-   local seen: {string:boolean} = {}
-   for _, base in ipairs(try_paths) do
-      if not seen[base] then
-         seen[base] = true
-         local candidate = base .. "/" .. path
-         local data, _ = read_file(candidate)
-         if data then
-            return candidate
+         if name_tok then
+            return eval_defined(get_lexeme(mgr, name_tok), state)
          end
+         return 0
+      elseif t.kind == lexer.K_NUMBER then
+         advance()
+         return parse_int_literal(lx)
+      elseif t.kind == lexer.K_CHAR then
+         advance()
+         return parse_char_literal(lx)
+      elseif t.kind == lexer.K_IDENTIFIER then
+         advance()
+         return 0
+      elseif t.kind == lexer.K_PUNCT and lx == "(" then
+         advance()
+         local v = parse_expression(0)
+         if cur_token() and get_lexeme(mgr, cur_token() as lexer.Token) == ")" then
+            advance()
+         end
+         return v
+      else
+         advance()
+         return 0
       end
    end
-   return nil
-end
 
-local function parse_include_target(tokens: {Token}, raw_source: string): string | nil, boolean
-   local _ = raw_source
-   if #tokens == 0 then
-      return nil, false
+   local function parse_unary(): integer
+      local t = cur_token()
+      if t is nil then return 0 end
+      local lx = cur_lx()
+      if lx == "!" then
+         advance()
+         return parse_unary() == 0 and 1 or 0
+      elseif lx == "~" then
+         advance()
+         return bit.bxor(parse_unary(), -1)
+      elseif lx == "+" then
+         advance()
+         return parse_unary()
+      elseif lx == "-" then
+         advance()
+         return -parse_unary()
+      else
+         return parse_primary()
+      end
    end
-   local first = tokens[1]
-   if first.kind == TK_STRING then
-      local stripped = first.lexeme:gsub("^\"", ""):gsub("\"$", "")
-      return stripped, false
-   end
-   if first.kind == TK_PUNCT and first.lexeme == "<" then
-      local pieces: {string} = {}
-      for _, t in ipairs(tokens) do
-         if t.kind == TK_PUNCT and t.lexeme == ">" then
+
+   function parse_expression(min_prec: integer): integer
+      local lhs = parse_unary()
+      while true do
+         local t = cur_token()
+         if t is nil then break end
+         local op = cur_lx()
+         local prec = binary_prec[op]
+         if prec is nil or prec < min_prec then
             break
-         elseif t.kind == TK_PUNCT and t.lexeme ~= "<" then
-            pieces[#pieces + 1] = t.lexeme
-         elseif t.kind == TK_IDENTIFIER or t.kind == TK_NUMBER or t.kind == TK_KEYWORD then
-            pieces[#pieces + 1] = t.lexeme
          end
+         advance()
+         local rhs = parse_expression(prec + 1)
+         if op == "||" then
+            lhs = (lhs ~= 0 or rhs ~= 0) and 1 or 0
+         elseif op == "&&" then
+            lhs = (lhs ~= 0 and rhs ~= 0) and 1 or 0
+         elseif op == "|" then
+            lhs = bit.bor(lhs, rhs)
+         elseif op == "^" then
+            lhs = bit.bxor(lhs, rhs)
+         elseif op == "&" then
+            lhs = bit.band(lhs, rhs)
+         elseif op == "==" then
+            lhs = lhs == rhs and 1 or 0
+         elseif op == "!=" then
+            lhs = lhs ~= rhs and 1 or 0
+         elseif op == "<" then
+            lhs = lhs < rhs and 1 or 0
+         elseif op == ">" then
+            lhs = lhs > rhs and 1 or 0
+         elseif op == "<=" then
+            lhs = lhs <= rhs and 1 or 0
+         elseif op == ">=" then
+            lhs = lhs >= rhs and 1 or 0
+         elseif op == "<<" then
+            lhs = bit.lshift(lhs, rhs)
+         elseif op == ">>" then
+            lhs = bit.rshift(lhs, rhs)
+         elseif op == "+" then
+            lhs = lhs + rhs
+         elseif op == "-" then
+            lhs = lhs - rhs
+         elseif op == "*" then
+            lhs = lhs * rhs
+         elseif op == "/" then
+            lhs = rhs ~= 0 and math.floor(lhs / rhs) or 0
+         elseif op == "%" then
+            lhs = rhs ~= 0 and (lhs % rhs) or 0
+         end
+      end
+      return lhs
+   end
+
+   return parse_expression(0)
+end
+
+local function expand_expr_tokens(tokens: TokenVector, state: PPState): TokenVector
+   local current = tokens
+   local mgr = state.mgr
+   local changed = true
+   while changed do
+      changed = false
+      local out = new_token_vector()
+      local ptr = current.data
+      local idx = 0
+      while idx < current.size do
+         local tok = ptr[idx]
+         local lx = get_lexeme(mgr, tok)
+         if tok.kind == lexer.K_IDENTIFIER and lx ~= "defined" then
+            local macro_idx = macro_table_get(state.macro_table, ffi.cast("const uint8_t*", lx), #lx)
+            if macro_idx > 0 then
+               local macro = state.macros[macro_idx]
+               if not macro.is_function then
+                  if state.expanding[macro.name] then
+                     vec_push(out, tok)
+                  else
+                     state.expanding[macro.name] = true
+                     changed = true
+                     if macro.built_in then
+                        local expanded = expand_builtin(macro, tok, state)
+                        local eptr = expanded.data
+                        for j = 0, expanded.size - 1 do
+                           vec_push(out, eptr[j])
+                        end
+                     else
+                        local expanded = substitute_macro(macro, {}, state)
+                        local eptr = expanded.data
+                        for j = 0, expanded.size - 1 do
+                           vec_push(out, eptr[j])
+                        end
+                     end
+                     state.expanding[macro.name] = nil
+                  end
+               else
+                  vec_push(out, tok)
+               end
+            else
+               vec_push(out, tok)
+            end
+         else
+            vec_push(out, tok)
+         end
+         idx = idx + 1
+      end
+      current = out
+   end
+   return current
+end
+
+local function parse_include_target(tokens: TokenVector, mgr: SourceManager): string | nil, boolean
+   if tokens.size == 0 then return nil, false end
+   local ptr = tokens.data
+   local first = ptr[0]
+   
+   if first.kind == lexer.K_STRING then
+      local s = get_lexeme(mgr, first)
+      return s:sub(2, -2), false -- strip quotes
+   elseif first.kind == lexer.K_PUNCT and get_lexeme(mgr, first) == "<" then
+      local pieces: {string} = {}
+      for i = 1, tokens.size - 1 do
+         local t = ptr[i]
+         local lx = get_lexeme(mgr, t)
+         if t.kind == lexer.K_PUNCT and lx == ">" then
+            break
+         end
+         pieces[#pieces + 1] = lx
       end
       return table.concat(pieces), true
    end
    return nil, false
 end
 
-local function preprocess_inner(source: string, file_id: integer, reporter: Reporter, config: FastConfig, state: State, current_path?: string): function(): Token
-   local _ = config
-   local prev_dir = state.current_dir
-   if current_path then
-      state.current_dir = path_dir(current_path)
-      state.file_paths[file_id] = current_path
-   end
-   local text = replace_trigraphs(source)
-   text = normalize_newlines(text)
-   reporter:track_file(file_id, current_path, text)
-   text = splice_lines(text, reporter, file_id)
-   reporter:track_file(file_id, current_path, text)
-
-   local lexer = LexerFast.new_lexer(text, file_id)
-   local cond_stack: {ConditionalState} = {}
-   local pending_tokens: {Token} = {}
-   local pending_idx = 1
-   local include_stack: {function(): Token} = {}
-   local eof_returned = false
-
-   local function next_raw(): Token
-      local tc = LexerFast.next_token(lexer)
-      return make_token(lexer, tc)
-   end
-
-   local lookahead: Token | nil = nil
-   local function peek_raw(): Token
-      if not lookahead then
-         lookahead = next_raw()
-      end
-      return lookahead
-   end
-
-   local function consume_raw(): Token
-      local t = peek_raw()
-      lookahead = nil
-      return t
-   end
-
-   -- Forward declaration
-   local next_token: function(): Token
-
-   local function handle_directive(directive: Token, line_tokens: {Token})
-      local name = directive.lexeme
-      local body = {}
-      for i = 2, #line_tokens do
-         body[#body + 1] = line_tokens[i]
-      end
-      
-      local parent_skip = false
-      for i = 1, #cond_stack do
-         if cond_stack[i].skipping then
-            parent_skip = true
-            break
-         end
-      end
-
-      if name == "define" and not parent_skip then
-         parse_define(body, state)
-      elseif name == "undef" and not parent_skip then
-         if body[1] and body[1].kind == TK_IDENTIFIER then
-            state.macros[body[1].lexeme] = nil
-         end
-      elseif name == "ifdef" or name == "ifndef" then
-         local should_skip = false
-         if #body > 0 and body[1].kind == TK_IDENTIFIER then
-            local present = state.macros[body[1].lexeme] ~= nil
-            should_skip = name == "ifdef" and not present or name == "ifndef" and present
-         else
-            should_skip = true
-         end
-         local taken = not should_skip and not parent_skip
-         local effective_skip = parent_skip or should_skip
-         cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
-      elseif name == "if" then
-         local cond = false
-         if not parent_skip then
-            cond = parse_if_expr(body, state)
-         end
-         local effective_skip = parent_skip or not cond
-         local taken = cond and not parent_skip
-         cond_stack[#cond_stack + 1] = { skipping = effective_skip, branch_taken = taken, in_else = false }
-      elseif name == "elif" then
-         if #cond_stack == 0 then
-            reporter:report(Diagnostic.new("error", "#elif without #if", directive.span, "PP100"))
-         else
-            local top = cond_stack[#cond_stack]
-            if top.in_else then
-               reporter:report(Diagnostic.new("error", "#elif after #else", directive.span, "PP101"))
-            else
-               local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
-               if not top.branch_taken and not outer_skip then
-                  local cond = parse_if_expr(body, state)
-                  top.skipping = not cond
-                  top.branch_taken = cond
-               else
-                  top.skipping = true
-               end
-               cond_stack[#cond_stack] = top
-            end
-         end
-      elseif name == "else" then
-         if #cond_stack == 0 then
-            reporter:report(Diagnostic.new("error", "#else without #if", directive.span, "PP102"))
-         else
-            local top = cond_stack[#cond_stack]
-            if top.in_else then
-               reporter:report(Diagnostic.new("error", "duplicate #else", directive.span, "PP103"))
-            else
-               top.in_else = true
-               local outer_skip = (#cond_stack > 1 and cond_stack[#cond_stack - 1].skipping) or false
-               if top.branch_taken or outer_skip then
-                  top.skipping = true
-               else
-                  top.skipping = false
-                  top.branch_taken = true
-               end
-               cond_stack[#cond_stack] = top
-            end
-         end
-      elseif name == "endif" then
-         if #cond_stack == 0 then
-            reporter:report(Diagnostic.new("error", "#endif without #if", directive.span, "PP104"))
-         else
-            cond_stack[#cond_stack] = nil
-         end
-      elseif name == "include" and not parent_skip then
-         local target, is_system = parse_include_target(body, text)
-         if target then
-            local resolved = find_include(target, state, is_system)
-            if not resolved then
-               reporter:report(Diagnostic.new("error", "include not found: " .. target, directive.span, "PP200"))
-            elseif state.pragma_once[resolved] then
-               -- skip
-            else
-               local data, err = read_file(resolved)
-               if not data then
-                  reporter:report(Diagnostic.new("error", "failed to read include: " .. tostring(err), directive.span, "PP201"))
-               else
-                  local inc_iter = preprocess_inner(data, state.next_file_id, reporter, config, state, resolved)
-                  state.next_file_id = state.next_file_id + 1
-                  include_stack[#include_stack + 1] = inc_iter
-               end
-            end
-         end
-      elseif name == "pragma" then
-         if not parent_skip and body[1] and body[1].kind == TK_IDENTIFIER and body[1].lexeme == "once" then
-            if current_path then
-               state.pragma_once[current_path] = true
-            end
-         end
-      elseif name == "line" and not parent_skip then
-         if #body >= 1 and body[1].kind == TK_NUMBER then
-            local desired = tonumber(body[1].lexeme)
-            if desired then
-               local current_line = directive.span.line
-               state.file_line_adjust[file_id] = math.floor(desired) - (current_line + 1)
-               if body[2] and body[2].kind == TK_STRING then
-                  local fname = body[2].lexeme:gsub('^"', ""):gsub('"$', "")
-                  state.file_name_override[file_id] = fname
-               end
-            end
-         end
-      elseif name == "error" then
-         if not parent_skip then
-            local msg_parts: {string} = {}
-            for _, bt in ipairs(body) do
-               msg_parts[#msg_parts + 1] = bt.lexeme
-            end
-            reporter:report(Diagnostic.new("error", "#error " .. table.concat(msg_parts, " "), directive.span, "PP300"))
-         end
-      elseif name == "warning" then
-         if not parent_skip then
-            local msg_parts: {string} = {}
-            for _, bt in ipairs(body) do
-               msg_parts[#msg_parts + 1] = bt.lexeme
-            end
-            reporter:report(Diagnostic.new("warning", "#warning " .. table.concat(msg_parts, " "), directive.span, "PP301"))
-         end
-      end
-   end
-
-   next_token = function(): Token
-      -- 1. Serve from include stack
-      while #include_stack > 0 do
-         local inc_iter = include_stack[#include_stack]
-         local t = inc_iter()
-         if t.kind == TK_EOF then
-            include_stack[#include_stack] = nil
-         else
-            return t
-         end
-      end
-
-      -- 2. Serve from pending buffer
-      if pending_idx <= #pending_tokens then
-         local t = pending_tokens[pending_idx]
-         pending_idx = pending_idx + 1
-         return t
-      end
-
-      -- 3. Refill buffer
-      if eof_returned then
-         return new_token(TK_EOF, "", Span.new(file_id, #text, #text, 1, 1), false)
-      end
-
-      local raw_chunk: {Token} = {}
-      
-      while true do
-         local t = peek_raw()
-         if t.kind == TK_EOF then
-            consume_raw()
-            if #raw_chunk == 0 then
-               eof_returned = true
-               state.current_dir = prev_dir
-               if #cond_stack > 0 then
-                  reporter:report(Diagnostic.new("error", "unterminated conditional directive", Span.new(file_id, #text, #text, 1, 1), "PP400"))
-               end
-               return new_token(TK_EOF, "", Span.new(file_id, #text, #text, 1, 1), false)
-            end
-            break
-         end
-
-         local at_line_start = t.has_newline or (t.span.line == 1 and t.span.column == 1)
-         if at_line_start and t.kind == TK_PUNCT and t.lexeme == "#" then
-            -- If we have accumulated tokens, stop and process them first
-            if #raw_chunk > 0 then
-               break
-            end
-            
-            -- Parse directive line
-            consume_raw() -- eat #
-            local line_tokens: {Token} = {}
-            while true do
-               local lt = peek_raw()
-               if lt.kind == TK_EOF or lt.has_newline then
-                  break
-               end
-               line_tokens[#line_tokens + 1] = consume_raw()
-            end
-            
-            local directive = line_tokens[1]
-            if directive and (directive.kind == TK_IDENTIFIER or directive.kind == TK_KEYWORD) then
-               handle_directive(directive, line_tokens)
-               -- If include was pushed, return from it immediately
-               if #include_stack > 0 then
-                  return next_token()
-               end
-            end
-            -- Continue loop to get more tokens
-         else
-            local skip_active = false
-            if #cond_stack > 0 and cond_stack[#cond_stack].skipping then
-               skip_active = true
-            end
-            
-            if not skip_active then
-               raw_chunk[#raw_chunk + 1] = consume_raw()
-            else
-               consume_raw()
-            end
-         end
-      end
-
-      -- Expand macros in the chunk
-      pending_tokens = expand_macros(raw_chunk, state)
-      pending_idx = 1
-      
-      if #pending_tokens > 0 then
-         local t = pending_tokens[pending_idx]
-         pending_idx = pending_idx + 1
-         return t
-      else
-         -- Recurse if expansion resulted in empty (e.g. empty macro)
-         return next_token()
-      end
-   end
-
-   return next_token
-end
-
-local function preprocess_fast(source: string, file_id: integer, reporter?: Reporter, config?: FastConfig): PreprocessFastResult
-   local rep = reporter or Reporter.new()
-   local base_cfg = config or {}
-   local search_paths: {string} = base_cfg.search_paths or { "." }
-   local defines: {string:string} = base_cfg.defines or {} 
-   local undefs: {string:boolean} = base_cfg.undefs or {}
-   local cfg: FastConfig = {
-      search_paths = search_paths,
-      defines = defines,
-      undefs = undefs,
-      current_dir = base_cfg.current_dir or ".",
-      source_path = base_cfg.source_path,
-      no_system_paths = base_cfg.no_system_paths,
-   }
-   local state = make_state(rep, cfg, file_id)
-   local iter = preprocess_inner(source, file_id, rep, cfg, state, cfg.source_path)
-   return {
-      text = "",
-      tokens = {},
-      file_id = file_id,
-      iterator = iter,
-   }
-end
-
-local function materialize(res: PreprocessFastResult): PreprocessFastResult
-   local toks: {Token} = {}
+local function handle_directive(source: TokenSource, state: PPState, directive_line: integer, stack: {TokenSource})
+   local line_tokens = new_token_vector()
    while true do
-      local t = res.iterator()
-      toks[#toks + 1] = t
-      if t.kind == TK_EOF then
+      local t = source.peek()
+      if t.kind == lexer.K_EOF or t.line > directive_line then
          break
       end
+      vec_push(line_tokens, t)
+      source.next()
    end
-   local txt = text_from_tokens(toks)
-   local idx = 0
-   local function iter(): Token
-      idx = idx + 1
-      local t = toks[idx]
-      if t then
-         return t
+   if line_tokens.size == 0 then return end
+
+   local ptr = line_tokens.data
+   local dir_tok = ptr[0]
+   if dir_tok.kind ~= lexer.K_IDENTIFIER and dir_tok.kind ~= lexer.K_KEYWORD then
+      return
+   end
+
+   local name = get_lexeme(state.mgr, dir_tok)
+   local active = state.active
+   if name == "define" then
+      if not active then return end
+      local def_tokens = new_token_vector()
+      for i = 1, line_tokens.size - 1 do
+         vec_push(def_tokens, ptr[i])
       end
-      return toks[#toks]
+      parse_define(def_tokens, state)
+   elseif name == "undef" then
+      if not active then return end
+      if line_tokens.size > 1 then
+         local uname = get_lexeme(state.mgr, ptr[1])
+         macro_table_delete(state.macro_table, uname)
+      end
+   elseif name == "include" then
+      if not active then return end
+      local inc_tokens = new_token_vector()
+      for i = 1, line_tokens.size - 1 do
+         vec_push(inc_tokens, ptr[i])
+      end
+      local path, is_angle = parse_include_target(inc_tokens, state.mgr)
+      if path then
+         local cur_path = state.mgr.paths[dir_tok.file_id] or state.opts.current_dir or ""
+         local resolved = resolve_include(path, is_angle, state, cur_path)
+         if resolved then
+            if state.once_paths[resolved] then
+               return
+            end
+            local new_src = read_file(resolved)
+            if new_src then
+               local file_id = next_file_id(state.mgr)
+               local inc_source = new_lexer_source(new_src, file_id, state.mgr, resolved)
+               stack[#stack + 1] = inc_source
+            end
+         end
+      end
+   elseif name == "pragma" then
+      if not active then return end
+      if line_tokens.size > 1 and get_lexeme(state.mgr, ptr[1]) == "once" then
+         local info = ensure_source_info(state.mgr, dir_tok.file_id)
+         if info.path ~= "" then
+            state.once_paths[info.path] = true
+         end
+      end
+   elseif name == "if" then
+      local parent_active = state.active
+      local expr_tokens = new_token_vector()
+      for i = 1, line_tokens.size - 1 do
+         vec_push(expr_tokens, ptr[i])
+      end
+      local expanded = expand_expr_tokens(expr_tokens, state)
+      local expr_list: {lexer.Token} = {}
+      local eptr = expanded.data
+      for i = 0, expanded.size - 1 do
+         expr_list[#expr_list + 1] = eptr[i]
+      end
+      local cond_val = eval_expr(expr_list, state) ~= 0
+      local new_active = parent_active and cond_val
+      table.insert(state.cond_stack, { parent_active = parent_active, taken = new_active, else_seen = false })
+      state.active = new_active
+   elseif name == "ifdef" or name == "ifndef" then
+      local parent_active = state.active
+      local cond = false
+      if line_tokens.size > 1 then
+         local lname = get_lexeme(state.mgr, ptr[1])
+         cond = is_macro_defined(state, lname)
+      end
+      if name == "ifndef" then
+         cond = not cond
+      end
+      local new_active = parent_active and cond
+      table.insert(state.cond_stack, { parent_active = parent_active, taken = new_active, else_seen = false })
+      state.active = new_active
+   elseif name == "elif" then
+      if #state.cond_stack == 0 then return end
+      local frame = state.cond_stack[#state.cond_stack]
+      if frame.else_seen then
+         return
+      end
+      local cond = false
+      if not frame.taken and frame.parent_active then
+         local expr_tokens = new_token_vector()
+         for i = 1, line_tokens.size - 1 do
+            vec_push(expr_tokens, ptr[i])
+         end
+         local expanded = expand_expr_tokens(expr_tokens, state)
+         local expr_list: {lexer.Token} = {}
+         local eptr = expanded.data
+         for i = 0, expanded.size - 1 do
+            expr_list[#expr_list + 1] = eptr[i]
+         end
+         cond = eval_expr(expr_list, state) ~= 0
+      end
+      local new_active = frame.parent_active and (not frame.taken) and cond
+      frame.taken = frame.taken or new_active
+      state.active = new_active
+   elseif name == "else" then
+      if #state.cond_stack == 0 then return end
+      local frame = state.cond_stack[#state.cond_stack]
+      if frame.else_seen then
+         return
+      end
+      local new_active = frame.parent_active and not frame.taken
+      frame.taken = frame.taken or new_active
+      frame.else_seen = true
+      state.active = new_active
+   elseif name == "endif" then
+      if #state.cond_stack == 0 then return end
+      local frame = table.remove(state.cond_stack)
+      state.active = frame.parent_active
+   elseif name == "error" then
+      if not active then return end
+      local msg_parts: {string} = {}
+      for i = 1, line_tokens.size - 1 do
+         msg_parts[#msg_parts + 1] = get_lexeme(state.mgr, ptr[i])
+      end
+      local msg = table.concat(msg_parts, " ")
+      state.reporter:report(Diagnostic.new("error", msg, dir_tok:span(), "PP300"))
+   elseif name == "line" then
+      if not active then return end
+      if line_tokens.size > 1 then
+         local num = tonumber(get_lexeme(state.mgr, ptr[1])) or dir_tok.line
+         local info = ensure_source_info(state.mgr, dir_tok.file_id)
+         info.line_delta = (num - (directive_line + 1)) as integer
+         if line_tokens.size > 2 and ptr[2].kind == lexer.K_STRING then
+            local lx = get_lexeme(state.mgr, ptr[2])
+            local stripped = lx:sub(2, -2)
+            info.path = stripped
+            state.mgr.paths[dir_tok.file_id] = stripped
+         end
+      end
    end
-   res.tokens = toks
-   res.text = txt
-   res.iterator = iter
-   return res
 end
 
-local function preprocess(source: string, file_id: integer, reporter?: Reporter, config?: FastConfig): PreprocessFastResult
-   local res = preprocess_fast(source, file_id, reporter, config)
-   return materialize(res)
+local function preprocess(src: string, file_id: integer, reporter: Reporter, opts?: PPOptions): TokenSource
+   local mgr: SourceManager = {
+      sources = {},
+      ptrs = {},
+      paths = {},
+      infos = {},
+      next_id = file_id + 1,
+   }
+   last_file_id = -1
+   last_ptr = nil
+   local options: PPOptions = opts or {}
+   local refs: {any} = {}
+   local state: PPState = {
+      macros = {},
+      macro_table = new_macro_table(4096, refs),
+      macro_refs = refs,
+      mgr = mgr,
+       reporter = reporter,
+       once_paths = {},
+       cond_stack = {},
+       active = true,
+       expanding = {},
+       opts = options,
+       date_literal = os.date("%b %d %Y"),
+       time_literal = os.date("%H:%M:%S"),
+   }
+   install_builtins(state)
+   local defns: {string:string} | nil = options.defines
+   if not defns is nil then
+      for name, val in pairs(defns) do
+         local value = (val ~= "" and val) and val or "1"
+         define_object_macro(state, name, { make_synthetic_token(mgr, value, lexer.K_NUMBER) })
+      end
+   end
+   local undefs: {string:boolean} | nil = options.undefs
+   if not undefs is nil then
+      for name, _ in pairs(undefs) do
+         macro_table_delete(state.macro_table, name)
+      end
+   end
+   
+   register_source(mgr, file_id, src, options.source_path or "")
+   ensure_source_info(mgr, file_id)
+   local initial_source = new_lexer_source(src, file_id, mgr, options.source_path)
+   local stack: {TokenSource} = { initial_source }
+   
+   local function next_token(): lexer.Token
+      while #stack > 0 do
+         local top = stack[#stack]
+         local tok = top.peek() -- Peek first to check for directive
+         
+         if tok.kind == lexer.K_EOF then
+            top.next() -- Consume EOF
+            if top.macro_name then
+               state.expanding[top.macro_name] = nil
+            end
+            table.remove(stack)
+         elseif top.is_file and tok.kind == lexer.K_PUNCT and get_lexeme(mgr, tok) == "#" then
+             top.next() -- Consume '#'
+             handle_directive(top, state, tok.line, stack)
+         elseif not state.active then
+             top.next()
+         elseif tok.kind == lexer.K_IDENTIFIER then
+             top.next() -- Consume identifier
+             
+             local ptr: ffi.Pointer<integer>
+             if tok.file_id == last_file_id and last_ptr then
+                ptr = last_ptr
+             else
+                ptr = mgr.ptrs[tok.file_id]
+                last_file_id = tok.file_id
+                last_ptr = ptr
+             end
+             
+             local macro_idx = 0
+             if ptr then
+                 macro_idx = macro_table_get(state.macro_table, ptr + tok.start, tok.stop - tok.start)
+             end
+             
+             local macro: MacroC = nil
+             if macro_idx > 0 then
+                 macro = state.macros[macro_idx]
+             end
+
+             if macro then
+                if macro.is_function then
+                   local next_tok = top.peek()
+                   if next_tok.kind == lexer.K_PUNCT and get_lexeme(mgr, next_tok) == "(" then
+                      if state.expanding[macro.name] then
+                         return clone_token(tok)
+                      end
+                      state.expanding[macro.name] = true
+                      local args = parse_macro_args(top, mgr)
+                      local expanded = substitute_macro(macro, args, state)
+                      stack[#stack + 1] = new_vector_source(expanded, macro.name)
+                   else
+                      return clone_token(tok)
+                   end
+                else
+                   if state.expanding[macro.name] then
+                      return clone_token(tok)
+                   end
+                   state.expanding[macro.name] = true
+                   local expanded: TokenVector
+                   if macro.built_in then
+                      expanded = expand_builtin(macro, tok, state)
+                   else
+                      expanded = substitute_macro(macro, {}, state)
+                   end
+                   stack[#stack + 1] = new_vector_source(expanded, macro.name)
+                end
+             else
+                return clone_token(tok)
+             end
+        else
+            top.next() -- Consume
+            return clone_token(tok)
+        end
+     end
+      
+      local eof: lexer.Token = ffi.new("tl_token_fast")
+      eof.kind = lexer.K_EOF
+      return eof
+   end
+   
+   return {
+      next = next_token,
+      peek = function(): lexer.Token
+         if #stack == 0 then
+            local eof: lexer.Token = ffi.new("tl_token_fast")
+            eof.kind = lexer.K_EOF
+            return eof
+         end
+         return stack[#stack].peek()
+      end,
+      is_file = false,
+      lexer = initial_source.lexer,
+      mgr = mgr,
+   }
 end
 
-local function preprocess_file(path: string, file_id: integer, reporter?: Reporter, config?: FastConfig): PreprocessFastResult
-   local rep = reporter or Reporter.new()
-   rep:track_file(file_id, path)
-   local fh, err = io.open(path, "r")
-   if fh is nil then
-      local span = Span.new(file_id, 0, 0, 1, 1)
-      rep:report(Diagnostic.new("error", "failed to read file: " .. tostring(err), span, "PP000"))
-      return {
-         text = "",
-         tokens = {},
-         file_id = file_id,
-         iterator = function(): Token return new_token(TK_EOF, "", span, false) end,
-      }
-   end
-   local src = fh:read("*a") or ""
-   fh:close()
-   rep:track_file(file_id, path, src)
-   local cfg = config or {}
-   cfg.current_dir = cfg.current_dir or (cfg.source_path and path_dir(cfg.source_path)) or (path:match("^(.*)/[^/]+$") or ".")
-   cfg.source_path = cfg.source_path or path
-   cfg.search_paths = cfg.search_paths or { cfg.current_dir }
-   local res = preprocess_fast(src, file_id, rep, cfg)
-   return materialize(res)
-end
 
 return {
+   new_lexer_source = new_lexer_source,
+   get_lexeme = get_lexeme,
    preprocess = preprocess,
-   preprocess_file = preprocess_file,
-   materialize = materialize,
-   FastConfig = FastConfig,
-   PreprocessFastResult = PreprocessFastResult,
-   Token = LexerFast.Token,
-   K_EOF = K_EOF,
+   parse_define = parse_define,
+   parse_macro_args = parse_macro_args,
+   substitute_macro = substitute_macro,
 }

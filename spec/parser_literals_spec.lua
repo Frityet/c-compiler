@@ -1,11 +1,16 @@
 package.path = "build/?.lua;build/?/init.lua;src/?.lua;src/?/init.lua;" .. package.path
 
 local parser = require("parser.parser")
+local lexer = require("lexer.lexer")
 local Reporter = require("diag.reporter")
 
 local function parse_with_rep(src)
    local rep = Reporter.new()
-   local tu = parser.parse(src, 100, rep)
+   local lex = lexer.new_lexer(src, 100)
+   local function iter()
+      return lexer.next_token(lex)
+   end
+   local tu = parser.parse(lex.src_ptr, iter, rep)
    return tu, rep
 end
 

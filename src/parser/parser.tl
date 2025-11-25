@@ -1,33 +1,34 @@
 local Span = require("util.span")
-local LexerFast = require("lexer.lexer")
+local Lexer = require("lexer.lexer")
 local bit = require("bit")
 local types = require("sema.types")
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local ast = require("parser.ast")
+local ffi = require("ffi")
 
 local band = bit.band
 
-local type Token = LexerFast.Token
-local type TokenKindType = LexerFast.TokenKind
-local TK_IDENTIFIER: TokenKindType = LexerFast.K_IDENTIFIER
-local TK_NUMBER: TokenKindType = LexerFast.K_NUMBER
-local TK_STRING: TokenKindType = LexerFast.K_STRING
-local TK_CHAR: TokenKindType = LexerFast.K_CHAR
-local TK_KEYWORD: TokenKindType = LexerFast.K_KEYWORD
-local TK_PUNCT: TokenKindType = LexerFast.K_PUNCT
-local TK_EOF: TokenKindType = LexerFast.K_EOF
+local type Token = Lexer.Token
+local type TokenKindType = Lexer.TokenKind
+local TK_IDENTIFIER: TokenKindType = Lexer.K_IDENTIFIER
+local TK_NUMBER: TokenKindType = Lexer.K_NUMBER
+local TK_STRING: TokenKindType = Lexer.K_STRING
+local TK_CHAR: TokenKindType = Lexer.K_CHAR
+local TK_KEYWORD: TokenKindType = Lexer.K_KEYWORD
+local TK_PUNCT: TokenKindType = Lexer.K_PUNCT
+local TK_EOF: TokenKindType = Lexer.K_EOF
 
-local type LexerState = LexerFast.LexerState
-local type TokenC = LexerFast.TokenC
+local type LexerState = Lexer.LexerState
+local type Token = Lexer.Token
 
-local K_IDENTIFIER = LexerFast.K_IDENTIFIER
-local K_NUMBER = LexerFast.K_NUMBER
-local K_STRING = LexerFast.K_STRING
-local K_CHAR = LexerFast.K_CHAR
-local K_KEYWORD = LexerFast.K_KEYWORD
-local K_PUNCT = LexerFast.K_PUNCT
-local TOKEN_FLAG_NEWLINE = LexerFast.TOKEN_FLAG_NEWLINE
+local K_IDENTIFIER = Lexer.K_IDENTIFIER
+local K_NUMBER = Lexer.K_NUMBER
+local K_STRING = Lexer.K_STRING
+local K_CHAR = Lexer.K_CHAR
+local K_KEYWORD = Lexer.K_KEYWORD
+local K_PUNCT = Lexer.K_PUNCT
+local TOKEN_FLAG_NEWLINE = Lexer.TOKEN_FLAG_NEWLINE
 
 local type TokenIterator = function(): Token
 
@@ -73,40 +74,11 @@ local record Parser
    current: Token
    lookahead: Token
    reporter: Reporter
+   src_ptr: ffi.CString
    typedef_scopes: {{string:boolean}}
 end
 
-local function token_kind_from_fast(kind_id: integer): TokenKindType
-   if kind_id == K_IDENTIFIER then return TK_IDENTIFIER end
-   if kind_id == K_NUMBER then return TK_NUMBER end
-   if kind_id == K_STRING then return TK_STRING end
-   if kind_id == K_CHAR then return TK_CHAR end
-   if kind_id == K_KEYWORD then return TK_KEYWORD end
-   if kind_id == K_PUNCT then return TK_PUNCT end
-   return TK_EOF
-end
-
-local function lexeme_from_fast(lexer: LexerState, tc: TokenC): string
-   return string.sub(lexer.src, tc.start + 1, tc.stop)
-end
-
-local function fast_iter(source: string, file_id: integer): TokenIterator
-   local lexer = LexerFast.new_lexer(source, file_id)
-   return function(): Token
-      local tc = LexerFast.next_token(lexer)
-      local kind = token_kind_from_fast(tc.kind)
-      local lx = lexeme_from_fast(lexer, tc)
-      local span = Span.new(file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
-      return {
-         kind = kind,
-         lexeme = lx,
-         span = span,
-         has_newline = band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0,
-      }
-   end
-end
-
-local function new_parser(iter: TokenIterator, reporter: Reporter): Parser
+local function new_parser(src: ffi.CString, iter: TokenIterator, reporter: Reporter): Parser
    local first = iter()
    local second = first.kind == TK_EOF and first or iter()
    return {
@@ -114,6 +86,7 @@ local function new_parser(iter: TokenIterator, reporter: Reporter): Parser
       current = first,
       lookahead = second,
       reporter = reporter,
+      src_ptr = src,
       typedef_scopes = { {} },
    }
 end
@@ -134,7 +107,7 @@ end
 
 local function at(p: Parser, kind: TokenKindType, lexeme?: string): boolean
    local t = cur(p)
-   return t.kind == kind and (not lexeme or t.lexeme == lexeme)
+   return t.kind == kind and (not lexeme or t:lexeme(p.src_ptr) == lexeme)
 end
 
 local function advance(p: Parser): Token
@@ -151,11 +124,11 @@ local function advance(p: Parser): Token
    return t
 end
 
-local function is_attribute_token(tok: Token): boolean
+local function is_attribute_token(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_IDENTIFIER and tok.kind ~= TK_KEYWORD then
       return false
    end
-   local lx = tok.lexeme
+   local lx = tok:lexeme(p.src_ptr)
    return lx == "__attribute__" or lx == "__attribute" or lx == "__declspec" or lx == "__declspec__" or lx == "__asm" or lx == "__asm__" or lx == "asm"
 end
 
@@ -167,9 +140,9 @@ local function skip_parens(p: Parser)
    repeat
       local t = cur(p)
       if t.kind == TK_PUNCT then
-         if t.lexeme == "(" then
+         if t:lexeme(p.src_ptr) == "(" then
             depth = depth + 1
-         elseif t.lexeme == ")" then
+         elseif t:lexeme(p.src_ptr) == ")" then
             depth = depth - 1
          end
       end
@@ -183,7 +156,7 @@ end
 local function skip_attributes(p: Parser)
    while true do
        local tok = cur(p)
-       local lx = tok.lexeme
+       local lx = tok:lexeme(p.src_ptr)
        if tok.kind == TK_IDENTIFIER and (lx == "__attribute__" or lx == "__attribute" or lx == "__declspec" or lx == "__declspec__") then
           advance(p)
           while at(p, TK_PUNCT, "(") do
@@ -210,7 +183,7 @@ local function expect(p: Parser, kind: TokenKindType, lexeme?: string, code?: st
       return advance(p)
    end
    local msg = lexeme and ("expected '" .. lexeme .. "'") or ("expected " .. tostring(kind))
-   report_error(p, msg, t.span, code or "PAR000")
+   report_error(p, msg, t:span(), code or "PAR000")
    advance(p)
    return t
 end
@@ -233,48 +206,48 @@ local function is_typedef_name(p: Parser, tok: Token): boolean
       return false
    end
    for i = #p.typedef_scopes, 1, -1 do
-      if p.typedef_scopes[i][tok.lexeme] then
+      if p.typedef_scopes[i][tok:lexeme(p.src_ptr)] then
          return true
       end
    end
    return false
 end
 
-local function is_type_qualifier(tok: Token): boolean
-   return tok.kind == TK_KEYWORD and (tok.lexeme == "const" or tok.lexeme == "restrict" or tok.lexeme == "volatile")
+local function is_type_qualifier(p: Parser, tok: Token): boolean
+   return tok.kind == TK_KEYWORD and (tok:lexeme(p.src_ptr) == "const" or tok:lexeme(p.src_ptr) == "restrict" or tok:lexeme(p.src_ptr) == "volatile")
 end
 
-local function is_storage_class(tok: Token): boolean
+local function is_storage_class(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_KEYWORD then
       return false
    end
-   return tok.lexeme == "typedef" or tok.lexeme == "extern" or tok.lexeme == "static" or tok.lexeme == "auto" or tok.lexeme == "register"
+   return tok:lexeme(p.src_ptr) == "typedef" or tok:lexeme(p.src_ptr) == "extern" or tok:lexeme(p.src_ptr) == "static" or tok:lexeme(p.src_ptr) == "auto" or tok:lexeme(p.src_ptr) == "register"
 end
 
-local function is_function_specifier(tok: Token): boolean
-   return tok.kind == TK_KEYWORD and tok.lexeme == "inline"
+local function is_function_specifier(p: Parser, tok: Token): boolean
+   return tok.kind == TK_KEYWORD and tok:lexeme(p.src_ptr) == "inline"
 end
 
-local function is_builtin_keyword(tok: Token): boolean
+local function is_builtin_keyword(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_KEYWORD then
       return false
    end
-   local l = tok.lexeme
+   local l = tok:lexeme(p.src_ptr)
    return l == "void" or l == "_Bool" or l == "char" or l == "short" or l == "int" or l == "long" or l == "float" or l == "double" or l == "signed" or l == "unsigned" or l == "_Complex" or l == "_Imaginary"
 end
 
 local function is_type_specifier_start(p: Parser, tok: Token): boolean
-   if is_attribute_token(tok) then
+   if is_attribute_token(p, tok) then
       return true
    end
-   if is_builtin_keyword(tok) or is_type_qualifier(tok) or is_storage_class(tok) or is_function_specifier(tok) then
+   if is_builtin_keyword(p, tok) or is_type_qualifier(p, tok) or is_storage_class(p, tok) or is_function_specifier(p, tok) then
       return true
    end
-   if tok.kind == TK_KEYWORD and (tok.lexeme == "struct" or tok.lexeme == "union" or tok.lexeme == "enum") then
+   if tok.kind == TK_KEYWORD and (tok:lexeme(p.src_ptr) == "struct" or tok:lexeme(p.src_ptr) == "union" or tok:lexeme(p.src_ptr) == "enum") then
       return true
    end
    if tok.kind == TK_IDENTIFIER then
-      if string.sub(tok.lexeme, 1, 9) == "__builtin" then
+      if string.sub(tok:lexeme(p.src_ptr), 1, 9) == "__builtin" then
          return true
       end
       return is_typedef_name(p, tok)
@@ -287,13 +260,13 @@ local function looks_like_declaration(p: Parser): boolean
    if t.kind == TK_EOF then
    	 return false
    end
-   if is_attribute_token(t) then
+   if is_attribute_token(p, t) then
       return true
    end
    if is_type_specifier_start(p, t) then
       return true
    end
-   if t.kind == TK_PUNCT and t.lexeme == "(" then
+   if t.kind == TK_PUNCT and t:lexeme(p.src_ptr) == "(" then
       -- maybe a parenthesized type-name cast/abstract declarator
       local next_tok = peek(p, 1)
       if is_type_specifier_start(p, next_tok) then
@@ -340,7 +313,7 @@ local function qualify(base: types.TypeNode, qualifiers: {types.TypeQualifier}):
    }
 end
 
-local function apply_derived(base: types.TypeNode, derived: {ast.DerivedDeclarator}): types.TypeNode
+local function apply_derived(p: Parser, base: types.TypeNode, derived: {ast.DerivedDeclarator}): types.TypeNode
    local ty = base
    for i = #derived, 1, -1 do
       local d = derived[i]
@@ -364,19 +337,19 @@ local function apply_derived(base: types.TypeNode, derived: {ast.DerivedDeclarat
          }
       elseif d is ast.FunctionDeclarator then
          local params: {types.FunctionParam} = {}
-         for _, p in ipairs(d.params) do
+         for _, param in ipairs(d.params) do
             local param_name: string | nil = nil
-            local pdecl = p.declarator
+            local pdecl = param.declarator
             if not (pdecl is nil) then
                local pname = pdecl.name
                if not (pname is nil) then
-                  param_name = pname.lexeme
+                  param_name = pname:lexeme(p.src_ptr)
                end
             end
             table.insert(params, {
                name = param_name,
-               type = p.type,
-               span = p.span,
+               type = param.type,
+               span = param.span,
             })
          end
          ty = {
@@ -418,31 +391,31 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
       skip_attributes(p)
       local tok = cur(p)
       if not start_span then
-         start_span = tok.span
+         start_span = tok:span()
       end
-      if is_storage_class(tok) then
-         if tok.lexeme == "typedef" then
+      if is_storage_class(p, tok) then
+         if tok:lexeme(p.src_ptr) == "typedef" then
             table.insert(storage, "typedef")
-         elseif tok.lexeme == "extern" then
+         elseif tok:lexeme(p.src_ptr) == "extern" then
             table.insert(storage, "extern")
-         elseif tok.lexeme == "static" then
+         elseif tok:lexeme(p.src_ptr) == "static" then
             table.insert(storage, "static")
-         elseif tok.lexeme == "auto" then
+         elseif tok:lexeme(p.src_ptr) == "auto" then
             table.insert(storage, "auto")
-         elseif tok.lexeme == "register" then
+         elseif tok:lexeme(p.src_ptr) == "register" then
             table.insert(storage, "register")
          end
          advance(p)
-      elseif is_function_specifier(tok) then
+      elseif is_function_specifier(p, tok) then
          table.insert(func_specs, "inline")
          advance(p)
-      elseif is_type_qualifier(tok) then
-         local q = tok.lexeme == "const" and "const" or tok.lexeme == "restrict" and "restrict" or "volatile"
+      elseif is_type_qualifier(p, tok) then
+         local q = tok:lexeme(p.src_ptr) == "const" and "const" or tok:lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
          table.insert(qualifiers, q as types.TypeQualifier)
          advance(p)
-      elseif tok.kind == TK_KEYWORD and (tok.lexeme == "struct" or tok.lexeme == "union") then
+      elseif tok.kind == TK_KEYWORD and (tok:lexeme(p.src_ptr) == "struct" or tok:lexeme(p.src_ptr) == "union") then
          local spec: ast.StructSpecifier | nil = nil
-         local tag_kind = tok.lexeme
+         local tag_kind = tok:lexeme(p.src_ptr)
          advance(p)
          local name_tok: Token | nil = nil
          if cur(p).kind == TK_IDENTIFIER then
@@ -457,7 +430,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
                if not field_spec is nil then
                   local declarators: {ast.StructDeclarator} = {}
                   repeat
-                     local sd_span = cur(p).span
+                     local sd_span = cur(p):span()
                      local decl: ast.Declarator | nil = nil
                      local bit_width: ast.ExprNode | nil = nil
                      if not at(p, TK_PUNCT, ":") then
@@ -485,7 +458,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
             end
             expect(p, TK_PUNCT, "}", "PAR105")
          end
-         local span = start_span or tok.span
+         local span = start_span or tok:span()
          spec = {
             kind = "struct",
             tag_kind = tag_kind,
@@ -494,7 +467,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
             fields = fields,
          }
          type_spec = spec
-      elseif tok.kind == TK_KEYWORD and tok.lexeme == "enum" then
+      elseif tok.kind == TK_KEYWORD and tok:lexeme(p.src_ptr) == "enum" then
          advance(p)
          local name_tok: Token | nil = nil
          if cur(p).kind == TK_IDENTIFIER then
@@ -512,11 +485,11 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
                advance(p)
                value_expr = parse_assignment(p)
             end
-            local span = name.span
+            local span = name:span()
             local val_int: integer | nil = nil
             local ve = value_expr
             if not ve is nil and ve is ast.NumberLiteralExpr then
-               local parsed = tonumber(ve.token.lexeme)
+               local parsed = tonumber(ve.token:lexeme(p.src_ptr))
                if not (parsed is nil) then
                   val_int = math.floor(parsed)
                end
@@ -536,40 +509,40 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
             end
             expect(p, TK_PUNCT, "}", "PAR107")
          end
-         local span = start_span or tok.span
+         local span = start_span or tok:span()
          type_spec = { kind = "enum", span = span, name = name_tok, enumerators = enumerators }
-      elseif is_builtin_keyword(tok) then
-         if tok.lexeme == "signed" then
+      elseif is_builtin_keyword(p, tok) then
+         if tok:lexeme(p.src_ptr) == "signed" then
             signedness = true
-         elseif tok.lexeme == "unsigned" then
+         elseif tok:lexeme(p.src_ptr) == "unsigned" then
             signedness = false
-         elseif tok.lexeme == "short" then
+         elseif tok:lexeme(p.src_ptr) == "short" then
             short_count = short_count + 1
-         elseif tok.lexeme == "long" then
+         elseif tok:lexeme(p.src_ptr) == "long" then
             long_count = long_count + 1
-         elseif tok.lexeme == "void" then
+         elseif tok:lexeme(p.src_ptr) == "void" then
             base_builtin = "void"
-         elseif tok.lexeme == "_Bool" then
+         elseif tok:lexeme(p.src_ptr) == "_Bool" then
             base_builtin = "bool"
-         elseif tok.lexeme == "char" then
+         elseif tok:lexeme(p.src_ptr) == "char" then
             base_builtin = "char"
-         elseif tok.lexeme == "int" then
+         elseif tok:lexeme(p.src_ptr) == "int" then
             base_builtin = base_builtin or "int"
-         elseif tok.lexeme == "float" then
+         elseif tok:lexeme(p.src_ptr) == "float" then
             base_builtin = "float"
-         elseif tok.lexeme == "double" then
+         elseif tok:lexeme(p.src_ptr) == "double" then
             base_builtin = "double"
-         elseif tok.lexeme == "_Complex" then
+         elseif tok:lexeme(p.src_ptr) == "_Complex" then
             is_complex = true
-         elseif tok.lexeme == "_Imaginary" then
+         elseif tok:lexeme(p.src_ptr) == "_Imaginary" then
             is_imaginary = true
          end
          advance(p)
-      elseif type_spec is nil and tok.kind == TK_IDENTIFIER and string.sub(tok.lexeme, 1, 9) == "__builtin" then
-         type_spec = { kind = "typedef", span = tok.span, name = tok }
+      elseif type_spec is nil and tok.kind == TK_IDENTIFIER and string.sub(tok:lexeme(p.src_ptr), 1, 9) == "__builtin" then
+         type_spec = { kind = "typedef", span = tok:span(), name = tok }
          advance(p)
       elseif is_typedef_name(p, tok) then
-         type_spec = { kind = "typedef", span = tok.span, name = tok }
+         type_spec = { kind = "typedef", span = tok:span(), name = tok }
          advance(p)
       else
          break
@@ -588,7 +561,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
             base_builtin = "int"
          end
       end
-      local span = start_span or cur(p).span
+      local span = start_span or cur(p):span()
       local name = BN.int
       if base_builtin == "void" then
          name = BN.void
@@ -633,7 +606,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
       return nil
    end
 
-   local end_span = (not start_span is nil and start_span:merge(cur(p).span)) or cur(p).span
+   local end_span = (not start_span is nil and start_span:merge(cur(p):span())) or cur(p):span()
    return {
       storage = storage,
       func_specs = func_specs,
@@ -643,14 +616,14 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
    }
 end
 
-local function type_from_spec(spec: ast.TypeSpecifier): types.TypeNode
+local function type_from_spec(p: Parser, spec: ast.TypeSpecifier): types.TypeNode
    if spec is ast.BuiltinTypeSpec then
       return spec.builtin
    elseif spec is ast.TypedefTypeSpec then
       return {
          tag = "typedef",
          span = spec.span,
-         name = spec.name.lexeme,
+         name = spec.name:lexeme(p.src_ptr),
       } 
    elseif spec is ast.StructSpecifier then
       local fields: {types.Field} = {}
@@ -659,21 +632,21 @@ local function type_from_spec(spec: ast.TypeSpecifier): types.TypeNode
          for _, f in ipairs(sfields) do
                for _, decl in ipairs(f.declarators) do
                   local name = ""
-                  local base_type = type_from_spec(f.specifiers.type_spec)
+                  local base_type = type_from_spec(p, f.specifiers.type_spec)
                   base_type = qualify(base_type, f.specifiers.qualifiers)
                   local ty = base_type
                   local field_inner_decl = decl.declarator
                   if not (field_inner_decl is nil) then
-                     ty = apply_derived(base_type, field_inner_decl.derived)
+                     ty = apply_derived(p, base_type, field_inner_decl.derived)
                      local dname = field_inner_decl.name
                      if not (dname is nil) then
-                        name = dname.lexeme
+                        name = dname:lexeme(p.src_ptr)
                      end
                   end
                   local bit_width_num: integer | nil = nil
                   local bw = decl.bit_width
                   if not bw is nil and bw is ast.NumberLiteralExpr then
-                     local parsed_bw = tonumber(bw.token.lexeme)
+                     local parsed_bw = tonumber(bw.token:lexeme(p.src_ptr))
                      if not (parsed_bw is nil) then
                         bit_width_num = math.floor(parsed_bw)
                      end
@@ -683,7 +656,7 @@ local function type_from_spec(spec: ast.TypeSpecifier): types.TypeNode
             end
       end
       local sname = spec.name
-      local name = not sname is nil and sname.lexeme or nil
+      local name = not sname is nil and sname:lexeme(p.src_ptr) or nil
       if spec.tag_kind == "struct" then
          local struct_fields = spec.fields
          local complete = not (struct_fields is nil)
@@ -695,7 +668,7 @@ local function type_from_spec(spec: ast.TypeSpecifier): types.TypeNode
       end
    else
       local sname = spec.name
-      local name = not sname is nil and sname.lexeme or nil
+      local name = not sname is nil and sname:lexeme(p.src_ptr) or nil
       local values: {types.EnumConst} = {}
       local senums = spec.enumerators
       if not senums is nil then
@@ -703,12 +676,12 @@ local function type_from_spec(spec: ast.TypeSpecifier): types.TypeNode
             local value_int: integer | nil = nil
             local ev = en.value
             if not ev is nil and ev is ast.NumberLiteralExpr then
-               local parsed_val = tonumber(ev.token.lexeme)
+               local parsed_val = tonumber(ev.token:lexeme(p.src_ptr))
                if not (parsed_val is nil) then
                   value_int = math.floor(parsed_val)
                end
             end
-            table.insert(values, { name = en.name.lexeme, value = value_int, span = en.span })
+            table.insert(values, { name = en.name:lexeme(p.src_ptr), value = value_int, span = en.span })
          end
       end
       local built_int = make_builtin_type(BN.int, spec.span, true, false, false)
@@ -722,13 +695,13 @@ local function parse_pointer_chain(p: Parser): {ast.PointerDeclarator}
    end
    local star = advance(p)
    local quals: {types.TypeQualifier} = {}
-   while is_type_qualifier(cur(p)) do
-      local q = cur(p).lexeme == "const" and "const" or cur(p).lexeme == "restrict" and "restrict" or "volatile"
+   while is_type_qualifier(p, cur(p)) do
+      local q = cur(p):lexeme(p.src_ptr) == "const" and "const" or cur(p):lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
       table.insert(quals, q as types.TypeQualifier)
       advance(p)
    end
    local inner = parse_pointer_chain(p)
-   table.insert(inner, { kind = "pointer", span = star.span, qualifiers = quals })
+   table.insert(inner, { kind = "pointer", span = star:span(), qualifiers = quals })
    return inner
 end
 
@@ -743,7 +716,7 @@ local function parse_parameter_list(p: Parser): ({ast.Parameter}, boolean)
    if not is_type_specifier_start(p, cur(p)) and cur(p).kind == TK_IDENTIFIER then
       repeat
          local name_tok = advance(p)
-         local span = name_tok.span
+         local span = name_tok:span()
          local builtin_ty = make_builtin_type(BN.int, span, true, false, false)
          local spec: ast.DeclSpecifiers = { storage = {}, func_specs = {}, qualifiers = {}, type_spec = { kind = "builtin", span = span, builtin = builtin_ty }, span = span }
          local decl: ast.Declarator = { name = name_tok, derived = {}, span = span }
@@ -768,10 +741,10 @@ local function parse_parameter_list(p: Parser): ({ast.Parameter}, boolean)
          if not at(p, TK_PUNCT, ",") and not at(p, TK_PUNCT, ")") and not at(p, TK_PUNCT, "...") then
             d = parse_declarator(p, true)
          end
-         local base = qualify(type_from_spec(specs.type_spec), specs.qualifiers)
+         local base = qualify(type_from_spec(p, specs.type_spec), specs.qualifiers)
          local ty = base
          if not (d is nil) then
-            ty = apply_derived(base, d.derived)
+            ty = apply_derived(p, base, d.derived)
          end
          local span = specs.span
          if not (d is nil) then
@@ -794,7 +767,7 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
    local name_tok: Token | nil = nil
    local lparen_span: Span | nil = nil
    if at(p, TK_PUNCT, "(") then
-      lparen_span = advance(p).span
+      lparen_span = advance(p):span()
       local inner = parse_declarator(p, allow_abstract)
       expect(p, TK_PUNCT, ")", "PAR201")
       name_tok = inner.name
@@ -805,16 +778,16 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
             local arr_quals: {types.TypeQualifier} = {}
             local is_static = false
             -- type-qualifier-list? 'static'? type-qualifier-list? per C99
-            while is_type_qualifier(cur(p)) do
-               local q = cur(p).lexeme == "const" and "const" or cur(p).lexeme == "restrict" and "restrict" or "volatile"
+            while is_type_qualifier(p, cur(p)) do
+               local q = cur(p):lexeme(p.src_ptr) == "const" and "const" or cur(p):lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
                table.insert(arr_quals, q as types.TypeQualifier)
                advance(p)
             end
-            if cur(p).kind == TK_KEYWORD and cur(p).lexeme == "static" then
+            if cur(p).kind == TK_KEYWORD and cur(p):lexeme(p.src_ptr) == "static" then
                is_static = true
                advance(p)
-               while is_type_qualifier(cur(p)) do
-                  local q = cur(p).lexeme == "const" and "const" or cur(p).lexeme == "restrict" and "restrict" or "volatile"
+               while is_type_qualifier(p, cur(p)) do
+                  local q = cur(p):lexeme(p.src_ptr) == "const" and "const" or cur(p):lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
                   table.insert(arr_quals, q as types.TypeQualifier)
                   advance(p)
                end
@@ -828,16 +801,16 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
                size_expr = parse_expression(p)
             end
             local rbrack = expect(p, TK_PUNCT, "]", "PAR202")
-            table.insert(derived, { kind = "array", span = lbrack.span:merge(rbrack.span), qualifiers = arr_quals, is_static = is_static, is_vla = is_vla, size = size_expr })
+            table.insert(derived, { kind = "array", span = lbrack:span():merge(rbrack:span()), qualifiers = arr_quals, is_static = is_static, is_vla = is_vla, size = size_expr })
          else
             local lparen = advance(p)
             local params, is_variadic = parse_parameter_list(p)
             local rparen = expect(p, TK_PUNCT, ")", "PAR203")
             table.insert(derived, { kind = "function", params = params, is_variadic = is_variadic })
             if lparen_span is nil then
-               lparen_span = lparen.span:merge(rparen.span)
+               lparen_span = lparen:span():merge(rparen:span())
             else
-               lparen_span = lparen_span:merge(rparen.span)
+               lparen_span = lparen_span:merge(rparen:span())
             end
          end
       end
@@ -854,7 +827,7 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
    if cur(p).kind == TK_IDENTIFIER then
       name_tok = advance(p)
    elseif not allow_abstract then
-      report_error(p, "expected identifier", cur(p).span, "PAR204")
+      report_error(p, "expected identifier", cur(p):span(), "PAR204")
    end
 
    local derived: {ast.DerivedDeclarator} = {}
@@ -863,16 +836,16 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
          local lbrack = advance(p)
          local arr_quals: {types.TypeQualifier} = {}
          local is_static = false
-         while is_type_qualifier(cur(p)) do
-            local q = cur(p).lexeme == "const" and "const" or cur(p).lexeme == "restrict" and "restrict" or "volatile"
+         while is_type_qualifier(p, cur(p)) do
+            local q = cur(p):lexeme(p.src_ptr) == "const" and "const" or cur(p):lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
             table.insert(arr_quals, q as types.TypeQualifier)
             advance(p)
          end
-         if cur(p).kind == TK_KEYWORD and cur(p).lexeme == "static" then
+         if cur(p).kind == TK_KEYWORD and cur(p):lexeme(p.src_ptr) == "static" then
             is_static = true
             advance(p)
-            while is_type_qualifier(cur(p)) do
-               local q = cur(p).lexeme == "const" and "const" or cur(p).lexeme == "restrict" and "restrict" or "volatile"
+            while is_type_qualifier(p, cur(p)) do
+               local q = cur(p):lexeme(p.src_ptr) == "const" and "const" or cur(p):lexeme(p.src_ptr) == "restrict" and "restrict" or "volatile"
                table.insert(arr_quals, q as types.TypeQualifier)
                advance(p)
             end
@@ -886,16 +859,16 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
             size_expr = parse_expression(p)
          end
          local rbrack = expect(p, TK_PUNCT, "]", "PAR205")
-         table.insert(derived, { kind = "array", span = lbrack.span:merge(rbrack.span), qualifiers = arr_quals, is_static = is_static, is_vla = is_vla, size = size_expr })
+         table.insert(derived, { kind = "array", span = lbrack:span():merge(rbrack:span()), qualifiers = arr_quals, is_static = is_static, is_vla = is_vla, size = size_expr })
       else
          local lparen = advance(p)
          local params, is_variadic = parse_parameter_list(p)
          local rparen = expect(p, TK_PUNCT, ")", "PAR206")
          table.insert(derived, { kind = "function", params = params, is_variadic = is_variadic })
          if lparen_span is nil then
-            lparen_span = lparen.span:merge(rparen.span)
+            lparen_span = lparen:span():merge(rparen:span())
          else
-            lparen_span = lparen_span:merge(rparen.span)
+            lparen_span = lparen_span:merge(rparen:span())
          end
       end
    end
@@ -904,15 +877,15 @@ parse_declarator = function(p: Parser, allow_abstract: boolean): ast.Declarator
       table.insert(derived, ptr)
    end
 
-   local span = not name_tok is nil and name_tok.span or cur(p).span
+   local span = not name_tok is nil and name_tok:span() or cur(p):span()
    return { name = name_tok, derived = derived, span = span }
 end
 
-local function build_type(specs: ast.DeclSpecifiers, declarator: ast.Declarator | nil): types.TypeNode
-   local base = type_from_spec(specs.type_spec)
+local function build_type(p: Parser, specs: ast.DeclSpecifiers, declarator: ast.Declarator | nil): types.TypeNode
+   local base = type_from_spec(p, specs.type_spec)
    base = qualify(base, specs.qualifiers)
    if not declarator is nil then
-      return apply_derived(base, declarator.derived)
+      return apply_derived(p, base, declarator.derived)
    end
    return base
 end
@@ -921,15 +894,15 @@ local function parse_type_name(p: Parser): ast.TypeName
    local specs = parse_decl_specifiers(p)
    if specs is nil then
       local t = cur(p)
-      report_error(p, "expected type name", t.span, "PAR3000")
-      specs = { storage = {}, func_specs = {}, qualifiers = {}, type_spec = { kind = "builtin", span = t.span, builtin = make_builtin_type(BN.int, t.span, true, false, false) }, span = t.span }
+      report_error(p, "expected type name", t:span(), "PAR3000")
+      specs = { storage = {}, func_specs = {}, qualifiers = {}, type_spec = { kind = "builtin", span = t:span(), builtin = make_builtin_type(BN.int, t:span(), true, false, false) }, span = t:span() }
    end
    if specs is nil then return end
    local decl: ast.Declarator | nil = nil
    if not at(p, TK_PUNCT, ")") and not at(p, TK_PUNCT, ",") and not at(p, TK_PUNCT, "{") then
       decl = parse_declarator(p, true)
    end
-   local ty = build_type(specs, decl)
+   local ty = build_type(p, specs, decl)
    local span = specs.span
    if not decl is nil then
       span = span:merge(decl.span)
@@ -944,24 +917,24 @@ local function parse_primary(p: Parser): ast.ExprNode
       if at(p, TK_PUNCT, ":") then
          -- label lookahead handled in statement parsing; fallthrough
       end
-      return { kind = "identifier", span = t.span, name = t }
+      return { kind = "identifier", span = t:span(), name = t }
    elseif t.kind == TK_NUMBER then
       advance(p)
-      return { kind = "number_literal", span = t.span, token = t }
+      return { kind = "number_literal", span = t:span(), token = t }
    elseif t.kind == TK_STRING then
       local parts: {Token} = {}
       repeat
          table.insert(parts, cur(p))
          advance(p)
       until cur(p).kind ~= TK_STRING
-      local span = parts[1].span
-      local last = parts[#parts].span
+      local span = parts[1]:span()
+      local last = parts[#parts]:span()
       span = span:merge(last)
       return { kind = "string_literal", span = span, parts = parts }
    elseif t.kind == TK_CHAR then
       advance(p)
-      return { kind = "char_literal", span = t.span, token = t }
-   elseif t.kind == TK_PUNCT and t.lexeme == "(" then
+      return { kind = "char_literal", span = t:span(), token = t }
+   elseif t.kind == TK_PUNCT and t:lexeme(p.src_ptr) == "(" then
       advance(p)
       if is_type_specifier_start(p, cur(p)) then
          local type_name = parse_type_name(p)
@@ -981,9 +954,9 @@ local function parse_primary(p: Parser): ast.ExprNode
          return expr
       end
    end
-   report_error(p, "unexpected token in expression", t.span, "PAR300")
+   report_error(p, "unexpected token in expression", t:span(), "PAR300")
    advance(p)
-   return { kind = "identifier", span = t.span, name = t }
+   return { kind = "identifier", span = t:span(), name = t }
 end
 
 parse_postfix = function(p: Parser): ast.ExprNode
@@ -1002,22 +975,22 @@ parse_postfix = function(p: Parser): ast.ExprNode
             until false
          end
          local rparen = expect(p, TK_PUNCT, ")", "PAR303")
-         local span = lparen.span:merge(rparen.span)
+         local span = lparen:span():merge(rparen:span())
          expr = { kind = "call", span = span, callee = expr, args = args }
       elseif at(p, TK_PUNCT, "[") then
          local lbrack = advance(p)
          local index = parse_expression(p)
          local rbrack = expect(p, TK_PUNCT, "]", "PAR304")
-         local span = lbrack.span:merge(rbrack.span)
+         local span = lbrack:span():merge(rbrack:span())
          expr = { kind = "index", span = span, array = expr, index = index }
       elseif at(p, TK_PUNCT, ".") or at(p, TK_PUNCT, "->") then
          local op = advance(p)
          local field = expect(p, TK_IDENTIFIER, nil, "PAR305")
-         local span = expr.span:merge(field.span)
-         expr = { kind = "field", span = span, receiver = expr, field = field, is_arrow = op.lexeme == "->" } 
+         local span = expr.span:merge(field:span())
+         expr = { kind = "field", span = span, receiver = expr, field = field, is_arrow = op:lexeme(p.src_ptr) == "->" } 
       elseif at(p, TK_PUNCT, "++") or at(p, TK_PUNCT, "--") then
          local op = advance(p)
-         local span = expr.span:merge(op.span)
+         local span = expr.span:merge(op:span())
          expr = { kind = "unary", span = span, op = op, operand = expr, postfix = true }
       else
          break
@@ -1028,27 +1001,27 @@ end
 
 parse_unary = function(p: Parser): ast.ExprNode
    local t = cur(p)
-   if t.kind == TK_PUNCT and (t.lexeme == "&" or t.lexeme == "*" or t.lexeme == "+" or t.lexeme == "-" or t.lexeme == "~" or t.lexeme == "!") then
+   if t.kind == TK_PUNCT and (t:lexeme(p.src_ptr) == "&" or t:lexeme(p.src_ptr) == "*" or t:lexeme(p.src_ptr) == "+" or t:lexeme(p.src_ptr) == "-" or t:lexeme(p.src_ptr) == "~" or t:lexeme(p.src_ptr) == "!") then
       advance(p)
       local operand = parse_unary(p)
-      local span = t.span:merge(operand.span)
+      local span = t:span():merge(operand.span)
       return { kind = "unary", span = span, op = t, operand = operand, postfix = false } 
-   elseif t.kind == TK_PUNCT and (t.lexeme == "++" or t.lexeme == "--") then
+   elseif t.kind == TK_PUNCT and (t:lexeme(p.src_ptr) == "++" or t:lexeme(p.src_ptr) == "--") then
       advance(p)
       local operand = parse_unary(p)
-      local span = t.span:merge(operand.span)
+      local span = t:span():merge(operand.span)
       return { kind = "unary", span = span, op = t, operand = operand, postfix = false }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "sizeof" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "sizeof" then
       local kw = advance(p)
       if at(p, TK_PUNCT, "(") and is_type_specifier_start(p, peek(p, 1)) then
          advance(p)
          local type_name = parse_type_name(p)
          expect(p, TK_PUNCT, ")", "PAR306")
-         local span = kw.span:merge(type_name.span)
+         local span = kw:span():merge(type_name.span)
          return { kind = "sizeof", span = span, type_name = type_name, expr = nil } 
       else
          local operand = parse_unary(p)
-         local span = kw.span:merge(operand.span)
+         local span = kw:span():merge(operand.span)
          return { kind = "sizeof", span = span, type_name = nil, expr = operand } 
       end
    end
@@ -1058,10 +1031,10 @@ end
 local function parse_binary_rhs(p: Parser, min_prec: integer, lhs: ast.ExprNode): ast.ExprNode
    while true do
       local op_tok = cur(p)
-      if op_tok.kind ~= TK_PUNCT or not binary_precedence[op_tok.lexeme] then
+      if op_tok.kind ~= TK_PUNCT or not binary_precedence[op_tok:lexeme(p.src_ptr)] then
          break
       end
-      local prec = binary_precedence[op_tok.lexeme]
+      local prec = binary_precedence[op_tok:lexeme(p.src_ptr)]
       if prec < min_prec then
          break
       end
@@ -1069,7 +1042,7 @@ local function parse_binary_rhs(p: Parser, min_prec: integer, lhs: ast.ExprNode)
       local rhs = parse_unary(p)
       while true do
          local next_tok = cur(p)
-         local next_prec = next_tok.kind == TK_PUNCT and binary_precedence[next_tok.lexeme] or nil
+         local next_prec = next_tok.kind == TK_PUNCT and binary_precedence[next_tok:lexeme(p.src_ptr)] or nil
          if not next_prec or next_prec <= prec then
             break
          end
@@ -1098,7 +1071,7 @@ end
 parse_assignment = function(p: Parser): ast.ExprNode
    local lhs = parse_conditional(p)
    local t = cur(p)
-   if t.kind == TK_PUNCT and assignment_ops[t.lexeme] then
+   if t.kind == TK_PUNCT and assignment_ops[t:lexeme(p.src_ptr)] then
       advance(p)
       local rhs = parse_assignment(p)
       local span = lhs.span:merge(rhs.span)
@@ -1128,12 +1101,12 @@ parse_initializer = function(p: Parser): ast.Initializer
             if at(p, TK_PUNCT, ".") then
                local dot = advance(p)
                local name = expect(p, TK_IDENTIFIER, nil, "PAR308")
-               table.insert(designators, { kind = "field", span = dot.span:merge(name.span), name = name })
+               table.insert(designators, { kind = "field", span = dot:span():merge(name:span()), name = name })
             else
                local lbr = advance(p)
                local expr = parse_expression(p)
                local rbr = expect(p, TK_PUNCT, "]", "PAR309")
-               table.insert(designators, { kind = "index", span = lbr.span:merge(rbr.span), index = expr })
+               table.insert(designators, { kind = "index", span = lbr:span():merge(rbr:span()), index = expr })
             end
          end
          if #designators > 0 then
@@ -1154,7 +1127,7 @@ parse_initializer = function(p: Parser): ast.Initializer
          end
       end
       local rbrace = expect(p, TK_PUNCT, "}", "PAR311")
-      local span = lbrace.span:merge(rbrace.span)
+      local span = lbrace:span():merge(rbrace:span())
       return { kind = "list", span = span, entries = entries }
    else
       local expr = parse_assignment(p)
@@ -1177,7 +1150,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
    if at(p, TK_PUNCT, ";") then
       local ts = specs.type_spec
       if ts is ast.StructSpecifier or ts is ast.EnumSpecifier then
-         local tag_ty = type_from_spec(ts)
+         local tag_ty = type_from_spec(p, ts)
          table.insert(decls, { kind = "tag", specifiers = specs, type = tag_ty, span = specs.span })
          return decls
       end
@@ -1186,7 +1159,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
    repeat
       local d = parse_declarator(p, false)
       skip_attributes(p)
-      local ty = build_type(specs, d)
+      local ty = build_type(p, specs, d)
       local span = specs.span:merge(d.span)
       local is_function = false
       local outer = d.derived[1]
@@ -1198,7 +1171,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
             table.insert(decls, { kind = "typedef", specifiers = specs, declarator = d, type = ty, span = span })
             local dname = d.name
             if not dname is nil then
-               declare_typedef(p, dname.lexeme)
+               declare_typedef(p, dname:lexeme(p.src_ptr))
             end
          else
             local body: ast.StmtNode | nil = nil
@@ -1214,7 +1187,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
                   if not ospecs is nil then
                      repeat
                         local pd = parse_declarator(p, false)
-                        local pty = build_type(ospecs, pd)
+                        local pty = build_type(p, ospecs, pd)
                         local pspan = ospecs.span:merge(pd.span)
                         table.insert(old_params, { kind = "var", specifiers = ospecs, declarator = pd, type = pty, init = nil, span = pspan })
                         if not at(p, TK_PUNCT, ",") then
@@ -1243,7 +1216,7 @@ local function parse_decl_or_func(p: Parser, specs: ast.DeclSpecifiers): {ast.De
             table.insert(decls, { kind = "typedef", specifiers = specs, declarator = d, type = ty, span = span })
             local dname = d.name
             if not dname is nil then
-               declare_typedef(p, dname.lexeme)
+               declare_typedef(p, dname:lexeme(p.src_ptr))
             end
          else
             table.insert(decls, { kind = "var", specifiers = specs, declarator = d, type = ty, init = init, span = span })
@@ -1259,10 +1232,10 @@ end
 
 parse_statement = function(p: Parser): ast.StmtNode
    local t = cur(p)
-   if t.kind == TK_PUNCT and t.lexeme == ";" then
+   if t.kind == TK_PUNCT and t:lexeme(p.src_ptr) == ";" then
       local semi = advance(p)
-      return { kind = "null", span = semi.span }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "if" then
+      return { kind = "null", span = semi:span() }
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "if" then
       local kw = advance(p)
       expect(p, TK_PUNCT, "(", "PAR401")
       local cond = parse_expression(p)
@@ -1273,28 +1246,28 @@ parse_statement = function(p: Parser): ast.StmtNode
          advance(p)
          else_branch = parse_statement(p)
       end
-      local span = kw.span:merge((then_branch).span)
+      local span = kw:span():merge((then_branch).span)
       if not else_branch is nil then
          span = span:merge(else_branch.span)
       end
       return { kind = "if", span = span, cond = cond, then_branch = then_branch, else_branch = else_branch }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "switch" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "switch" then
       local kw = advance(p)
       expect(p, TK_PUNCT, "(", "PAR403")
       local expr = parse_expression(p)
       expect(p, TK_PUNCT, ")", "PAR404")
       local body = parse_statement(p)
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "switch", span = span, expr = expr, body = body }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "while" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "while" then
       local kw = advance(p)
       expect(p, TK_PUNCT, "(", "PAR405")
       local cond = parse_expression(p)
       expect(p, TK_PUNCT, ")", "PAR406")
       local body = parse_statement(p)
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "while", span = span, cond = cond, body = body }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "do" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "do" then
       local kw = advance(p)
       local body = parse_statement(p)
       expect(p, TK_KEYWORD, "while", "PAR407")
@@ -1302,9 +1275,9 @@ parse_statement = function(p: Parser): ast.StmtNode
       local cond = parse_expression(p)
       expect(p, TK_PUNCT, ")", "PAR409")
       expect(p, TK_PUNCT, ";", "PAR410")
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "do_while", span = span, body = body, cond = cond }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "for" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "for" then
       local kw = advance(p)
       expect(p, TK_PUNCT, "(", "PAR411")
       push_typedef_scope(p)
@@ -1338,54 +1311,54 @@ parse_statement = function(p: Parser): ast.StmtNode
       expect(p, TK_PUNCT, ")", "PAR415")
       local body = parse_statement(p)
       pop_typedef_scope(p)
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "for", span = span, init = init, cond = cond, step = step, body = body }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "return" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "return" then
       local kw = advance(p)
       local expr: ast.ExprNode | nil = nil
       if not at(p, TK_PUNCT, ";") then
          expr = parse_expression(p)
       end
       expect(p, TK_PUNCT, ";", "PAR416")
-      local span = kw.span
+      local span = kw:span()
       if not expr is nil then
          span = span:merge(expr.span)
       end
       return { kind = "return", span = span, value = expr }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "break" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "break" then
       local kw = advance(p)
       expect(p, TK_PUNCT, ";", "PAR417")
-      return { kind = "break", span = kw.span }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "continue" then
+      return { kind = "break", span = kw:span() }
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "continue" then
       local kw = advance(p)
       expect(p, TK_PUNCT, ";", "PAR418")
-      return { kind = "continue", span = kw.span }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "goto" then
+      return { kind = "continue", span = kw:span() }
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "goto" then
       local kw = advance(p)
       local name = expect(p, TK_IDENTIFIER, nil, "PAR419")
       expect(p, TK_PUNCT, ";", "PAR420")
-      local span = kw.span:merge(name.span)
+      local span = kw:span():merge(name:span())
       return { kind = "goto", span = span, name = name }
-   elseif at(p, TK_IDENTIFIER) and peek(p, 1).kind == TK_PUNCT and peek(p, 1).lexeme == ":" then
+   elseif at(p, TK_IDENTIFIER) and peek(p, 1).kind == TK_PUNCT and peek(p, 1):lexeme(p.src_ptr) == ":" then
       local name = advance(p)
       advance(p) -- consume colon
       local body = parse_statement(p)
-      local span = name.span:merge((body).span)
+      local span = name:span():merge((body).span)
       return { kind = "label", span = span, name = name, body = body }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "case" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "case" then
       local kw = advance(p)
       local expr = parse_expression(p)
       expect(p, TK_PUNCT, ":", "PAR421")
       local body = parse_statement(p)
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "case", span = span, expr = expr, body = body }
-   elseif t.kind == TK_KEYWORD and t.lexeme == "default" then
+   elseif t.kind == TK_KEYWORD and t:lexeme(p.src_ptr) == "default" then
       local kw = advance(p)
       expect(p, TK_PUNCT, ":", "PAR422")
       local body = parse_statement(p)
-      local span = kw.span:merge((body).span)
+      local span = kw:span():merge((body).span)
       return { kind = "default", span = span, body = body }
-   elseif t.kind == TK_PUNCT and t.lexeme == "{" then
+   elseif t.kind == TK_PUNCT and t:lexeme(p.src_ptr) == "{" then
       local lbrace = advance(p)
       push_typedef_scope(p)
       local items: {ast.StmtNode} = {}
@@ -1405,14 +1378,14 @@ parse_statement = function(p: Parser): ast.StmtNode
       end
       local rbrace = expect(p, TK_PUNCT, "}", "PAR424")
       pop_typedef_scope(p)
-      local span = lbrace.span:merge(rbrace.span)
+      local span = lbrace:span():merge(rbrace:span())
       return { kind = "compound", span = span, items = items }
    elseif looks_like_declaration(p) then
       local specs_opt = parse_decl_specifiers(p)
       if specs_opt is nil then
-         report_error(p, "expected declaration", cur(p).span, "PAR425")
+         report_error(p, "expected declaration", cur(p):span(), "PAR425")
          advance(p)
-         return { kind = "null", span = cur(p).span }
+         return { kind = "null", span = cur(p):span() }
       end
       local specs = specs_opt
       local decls = parse_decl_or_func(p, specs)
@@ -1429,7 +1402,7 @@ local function parse_external_declaration(p: Parser): {ast.DeclNode}
    local specs = parse_decl_specifiers(p)
    if not specs then
       local t = cur(p)
-      report_error(p, "expected declaration", t.span, "PAR700")
+      report_error(p, "expected declaration", t:span(), "PAR700")
       advance(p)
       return {}
    end
@@ -1448,23 +1421,6 @@ local function parse_external_declaration(p: Parser): {ast.DeclNode}
    return decls
 end
 
-local function tokens_to_iter(tokens: {Token}): TokenIterator
-   local idx = 0
-   local last = tokens[#tokens]
-   if last is nil then
-      error("parser requires at least one token")
-   end
-   
-   return function(): Token
-      idx = idx + 1
-      local t = tokens[idx]
-      if t then
-         return t
-      end
-      return last
-   end
-end
-
 local function parse_translation_unit(p: Parser): ast.TranslationUnit
    local decls: {ast.DeclNode} = {}
    while cur(p).kind ~= TK_EOF do
@@ -1478,20 +1434,12 @@ local function parse_translation_unit(p: Parser): ast.TranslationUnit
       end
       ::continue::
    end
-   return { decls = decls }
+   return { decls = decls, src_ptr = p.src_ptr }
 end
 
-local function parse_source(source: string, file_id: integer, reporter?: Reporter, tokens?: {Token}, iterator?: TokenIterator): ast.TranslationUnit
+local function parse_source(src: ffi.CString, iterator: TokenIterator, reporter?: Reporter): ast.TranslationUnit
    local rep = reporter or Reporter.new()
-   local iter: TokenIterator
-   if iterator then
-      iter = iterator
-   elseif tokens then
-      iter = tokens_to_iter(tokens)
-   else
-      iter = fast_iter(source, file_id)
-   end
-   local p = new_parser(iter, rep)
+   local p = new_parser(src, iterator, rep)
    return parse_translation_unit(p)
 end
 

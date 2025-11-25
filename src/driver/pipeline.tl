@@ -4,13 +4,13 @@ local Span = require("util.span")
 local Preprocessor = require("pp.preprocessor")
 local Parser = require("parser.parser")
 local Checker = require("sema.checker")
-local LexerFast = require("lexer.lexer")
+local lexer = require("lexer.lexer")
 local ast = require("parser.ast")
 
-local type Token = LexerFast.Token
-local K_PUNCT = LexerFast.K_PUNCT
-local K_IDENTIFIER = LexerFast.K_IDENTIFIER
-local K_EOF = LexerFast.K_EOF
+local type Token = lexer.Token
+local K_PUNCT = lexer.K_PUNCT
+local K_IDENTIFIER = lexer.K_IDENTIFIER
+local K_EOF = lexer.K_EOF
 local type TranslationUnit = ast.TranslationUnit
 local type CheckedTranslationUnit = Checker.CheckedTranslationUnit
 
@@ -43,9 +43,13 @@ local function read_file(path: string): string | nil, string | nil
    return data, nil
 end
 
-local function dump_tokens(tokens: {Token})
-   for _, t in ipairs(tokens) do
-      io.stdout:write(string.format("%d\t%s\n", t.kind, t.lexeme))
+local function dump_tokens(state: lexer.LexerState, next_token: function(): Token)
+   while true do
+      local t = next_token()
+      if not t or t.kind == K_EOF then
+         break
+      end
+      io.stdout:write(string.format("%d\t%s\n", t.kind, lexer.lexeme(t, state.src_ptr)))
    end
 end
 
@@ -62,7 +66,7 @@ local record WrappedIterator
    text: function(): string
 end
 
-local function wrap_iterator(base: function(): Token, capture_tokens: boolean, build_text: boolean): WrappedIterator
+local function wrap_iterator(state: lexer.LexerState, base: function(): Token, capture_tokens: boolean, build_text: boolean): WrappedIterator
    local tokens: {Token} = {}
    local parts: {string} = {}
    local prev: Token | nil = nil
@@ -74,7 +78,7 @@ local function wrap_iterator(base: function(): Token, capture_tokens: boolean, b
       if prev and should_insert_space(prev, tok) then
          parts[#parts + 1] = " "
       end
-      parts[#parts + 1] = tok.lexeme
+      parts[#parts + 1] = tostring(lexer.lexeme(tok, state.src_ptr))
    end
 
    local function iter(): Token
@@ -115,26 +119,32 @@ local function compile_file(path: string, file_id: integer, opts?: PipelineOptio
    rep:track_file(file_id, path, src)
 
    local dir = path_dir(path)
-   local pp = Preprocessor.preprocess(src, file_id, rep, {
+   local pp = Preprocessor.preprocess(src, file_id, rep --[[, {
       search_paths = { dir },
       defines = {},
       undefs = {},
       current_dir = dir,
       source_path = path,
-   })
+   }]])
+
+   local lex = pp.lexer
+   if lex is nil then
+      rep:report(Diagnostic.new("error", "preprocessor failed to return lexer state", Span.new(file_id, 0, 0, 1, 1), "DRV002"))
+      return nil
+   end
 
    local need_tokens = options.dump_tokens
    local need_text = options.want_pp_output
 
-   local wrapped = wrap_iterator(pp.iterator, need_tokens, need_text)
-   local iter = wrapped.iter
+   local wrapped = wrap_iterator(lex, pp.next, need_tokens, need_text)
+   -- local iter = wrapped.iter
 
-   local tu: TranslationUnit = Parser.parse(src, file_id, rep, nil, iter)
+   local tu: TranslationUnit = Parser.parse(lex.src_ptr, pp.next, rep)
 
    local checked = Checker.check(tu, rep)
-   if need_tokens then
-      dump_tokens(wrapped.tokens)
-   end
+   -- if need_tokens then
+   --    dump_tokens(pp.lexer, pp.next)
+   -- end
 
    local pp_text = need_text and wrapped.text() or ""
    local tokens_out = need_tokens and wrapped.tokens or {}

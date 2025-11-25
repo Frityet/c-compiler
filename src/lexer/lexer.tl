@@ -47,15 +47,8 @@ local record TokenC is ffi.CData
    flags: integer
 end
 
-local record Token
-   kind: TokenKind
-   lexeme: string
-   span: Span
-   has_newline: boolean
-end
-
 local type Uint8Array = ffi.Array<integer>
-local type Uint8Ptr = ffi.Pointer<integer>
+local type Uint8Ptr = ffi.CString
 
 local TokenType = ffi.typeof("tl_token_fast")
 
@@ -135,6 +128,7 @@ local keywords: {string:boolean} = {
 
 ffi.cdef [[
 int memcmp(const void *s1, const void *s2, size_t n);
+int strlen(const char *s);
 ]]
 local C = ffi.C
 
@@ -519,7 +513,9 @@ local function next_token(state: LexerState): TokenC
       tok.line = line
       tok.col = col
       tok.flags = 0
-      return tok
+      local eof_arr: ffi.Array<TokenC> = ffi.new("tl_token_fast[1]")
+      ffi.copy(eof_arr, tok, ffi.sizeof("tl_token_fast"))
+      return eof_arr[0]
    end
 
    tok.kind = kind
@@ -528,44 +524,70 @@ local function next_token(state: LexerState): TokenC
    tok.line = line
    tok.col = start_col
    tok.flags = newline_flag
-   return tok
+   local out_arr: ffi.Array<TokenC> = ffi.new("tl_token_fast[1]")
+   ffi.copy(out_arr, tok, ffi.sizeof("tl_token_fast"))
+   return out_arr[0]
 end
 
-local function lexeme(state: LexerState, tok: TokenC): string
-   return ffi.string(state.src_ptr + tok.start, tok.stop - tok.start)
+ffi.cdef [[
+struct tl_string_view {
+   const uint8_t *ptr;
+   uint32_t len;
+};
+]]
+local TLStringView = ffi.typeof("struct tl_string_view") as function(ptr: Uint8Ptr, len: integer)
+
+local record StringView is ffi.CData where ffi.istype("struct tl_string_view", self)
+   ptr: Uint8Ptr
+   len: integer
+
+   metamethod __tostring: function(self): string
+   metamethod __eq: function(self, other: ffi.CData): boolean
+   metamethod __eq: function(self, other: string): boolean
+   metamethod __len: function(self): integer = macroexp(self: self): integer return self.len end
 end
 
-local function token_from_c(state: LexerState, tc: TokenC): Token
-   local lx = lexeme(state, tc)
-   local span = Span.new(state.file_id, tc.start + 1, tc.stop + 1, tc.line, tc.col)
-   return {
-      kind = tc.kind,
-      lexeme = lx,
-      span = span,
-      has_newline = band(tc.flags, TOKEN_FLAG_NEWLINE) ~= 0,
-   }
-end
-
-local function lex_all(source: string, file_id: integer): {Token}
-   local lex = new_lexer(source, file_id)
-   local out: {Token} = {}
-   while true do
-      local tc = next_token(lex)
-      out[#out + 1] = token_from_c(lex, tc)
-      if tc.kind == K_EOF then
-         break
+ffi.metatype("struct tl_string_view", {
+   __tostring = function(self: StringView): string
+      return ffi.string(self.ptr, self.len)
+   end,
+   __eq = function(self: StringView, other: ffi.String): boolean
+      local other_len: integer
+      if other is string then
+         other_len = #other
+      else
+         other_len = (C.strlen as function(ffi.CData): integer)(other)
       end
-   end
-   return out
+
+      if self.len ~= other_len then
+         return false
+      end
+      return (C.memcmp as function(ffi.CData, ffi.String, integer))(self.ptr, other, self.len) == 0
+   end,
+})
+
+function TokenC:lexeme(src: ffi.CString): string
+   return ffi.string(src + self.start, self.stop - self.start)
 end
+
+function TokenC:span(): Span
+   return Span.new(self.file_id, self.start, self.stop, self.line, self.col)
+end
+
+ffi.metatype("tl_token_fast", {
+   __index = TokenC,
+   __tostring = function(self: TokenC): string
+      return string.format("Token(kind=%d, span=%d:%d:%d:+%d)", self.kind, self.file_id, self.line, self.col, self.stop - self.start)
+   end,
+})
 
 return {
    new_lexer = new_lexer,
    next_token = next_token,
-   lexeme = lexeme,
-   token_from_c = token_from_c,
-   Token = Token,
-   lex_all = lex_all,
+   lexeme = TokenC.lexeme,
+   -- token_from_c = token_from_c,
+   -- Token = Token,
+   -- lex_all = lex_all,
    LexerState = LexerState,
    TokenKind = TokenKind,
    TokenFlags = TokenFlags,
@@ -581,5 +603,5 @@ return {
    K_WHITESPACE = K_WHITESPACE,
    TOKEN_FLAG_NEWLINE = TOKEN_FLAG_NEWLINE,
    TOKEN_FLAG_LEADING_SPACE = TOKEN_FLAG_LEADING_SPACE,
-   TokenC = TokenC,
+   Token = TokenC,
 }
