@@ -23,6 +23,7 @@ end
 local record SourceManager
    sources: {integer:string}
    ptrs: {integer:ffi.CString}
+   buffers: {integer:ffi.CData}
    paths: {integer:string}
    infos: {integer: SourceInfo}
    next_id: integer
@@ -42,18 +43,8 @@ local record PPOptions
    source_path: string | nil
 end
 
-local last_file_id = -1
-local last_ptr: ffi.CString = nil
-
 local function get_lexeme(mgr: SourceManager, tok: lexer.Token): string
-   local ptr: ffi.CString
-   if tok.file_id == last_file_id and last_ptr then
-      ptr = last_ptr
-   else
-      ptr = mgr.ptrs[tok.file_id]
-      last_file_id = tok.file_id
-      last_ptr = ptr
-   end
+   local ptr: ffi.CString = mgr.ptrs[tok.file_id]
    if not ptr then return "" end
    return ffi.string(ptr + tok.start, tok.stop - tok.start)
 end
@@ -221,6 +212,7 @@ local record PPState
    macros: {MacroC}
    macro_table: MacroTable
    macro_refs: {any}
+   macro_map: {string: integer}
    mgr: SourceManager
    reporter: Reporter
    once_paths: {string:boolean}
@@ -234,19 +226,18 @@ end
 
 local function macro_index(state: PPState, tok: lexer.Token): integer
    local mgr = state.mgr
-   local ptr: ffi.CString
-   if tok.file_id == last_file_id and last_ptr then
-      ptr = last_ptr
-   else
-      ptr = mgr.ptrs[tok.file_id]
-      last_file_id = tok.file_id
-      last_ptr = ptr
+   local ptr: ffi.CString = mgr.ptrs[tok.file_id]
+   if not ptr then return 0 end
+   local base: ffi.Pointer<integer> = ffi.cast("const uint8_t*", ptr)
+   local idx = macro_table_get(state.macro_table, base + tok.start, tok.stop - tok.start)
+   if idx == 0 then
+      local name = get_lexeme(mgr, tok)
+      local map_idx = state.macro_map[name]
+      if not map_idx is nil then
+         return map_idx
+      end
    end
-   if ptr then
-      local base: ffi.Pointer<integer> = ffi.cast("const uint8_t*", ptr)
-      return macro_table_get(state.macro_table, base + tok.start, tok.stop - tok.start)
-   end
-   return 0
+   return idx
 end
 
 local record TokenSource
@@ -256,6 +247,7 @@ local record TokenSource
    lexer: lexer.LexerState | nil
    mgr: SourceManager | nil
    macro_name: string | nil
+   vec: TokenVector | nil
 end
 
 local TOKEN_SIZE<const> = ffi.sizeof("tl_token_fast")
@@ -263,7 +255,9 @@ local ffi_copy<const> = ffi.copy
 
 local function register_source(mgr: SourceManager, file_id: integer, src: string, path: string | nil)
    mgr.sources[file_id] = src
-   mgr.ptrs[file_id] = ffi.cast("const char*", src)
+   local buf: ffi.CData = ffi.new("uint8_t[?]", #src + 1, src)
+   mgr.buffers[file_id] = buf
+   mgr.ptrs[file_id] = ffi.cast("const char*", buf)
    mgr.paths[file_id] = path or mgr.paths[file_id] or ""
    if mgr.infos[file_id] == nil then
       mgr.infos[file_id] = { path = mgr.paths[file_id] or "", line_delta = 0 }
@@ -315,10 +309,16 @@ local function define_object_macro(state: PPState, name: string, tokens: {lexer.
    }
    table.insert(state.macros, macro)
    macro_table_put(state.macro_table, name, #state.macros, state.macro_refs)
+   state.macro_map[name] = #state.macros
 end
 
 local function is_macro_defined(state: PPState, name: string): boolean
-   return macro_table_get(state.macro_table, ffi.cast("const uint8_t*", name), #name) > 0
+   return state.macro_map[name] ~= nil
+end
+
+local function remove_macro(state: PPState, name: string)
+   macro_table_delete(state.macro_table, name)
+   state.macro_map[name] = nil
 end
 
 local function install_builtins(state: PPState)
@@ -438,6 +438,8 @@ local function new_lexer_source(src: string, file_id: integer, mgr: SourceManage
       is_file = true,
       lexer = lex,
       mgr = mgr,
+      macro_name = nil,
+      vec = nil,
    }
 end
 
@@ -517,7 +519,15 @@ local function new_vector_source(vec: TokenVector, macro_name: string | nil): To
       end
       return ptr[idx]
    end
-   return { next = next_token, peek = peek, is_file = false, lexer = nil, mgr = nil, macro_name = macro_name }
+   return {
+      next = next_token,
+      peek = peek,
+      is_file = false,
+      lexer = nil,
+      mgr = nil,
+      macro_name = macro_name,
+      vec = vec, -- keep vector alive for the lifetime of this source
+   }
 end
 
 
@@ -586,6 +596,7 @@ local function parse_define(tokens: TokenVector, state: PPState)
    
    table.insert(state.macros, macro)
    macro_table_put(state.macro_table, name, #state.macros, state.macro_refs)
+   state.macro_map[name] = #state.macros
 end
 
    local function parse_macro_args(source: TokenSource, mgr: SourceManager): {TokenVector}
@@ -1063,7 +1074,7 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       if not active then return end
       if line_tokens.size > 1 then
          local uname = get_lexeme(state.mgr, ptr[1])
-         macro_table_delete(state.macro_table, uname)
+         remove_macro(state, uname)
       end
    elseif name == "include" then
       if not active then return end
@@ -1195,18 +1206,18 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
    local mgr: SourceManager = {
       sources = {},
       ptrs = {},
+      buffers = {},
       paths = {},
       infos = {},
       next_id = file_id + 1,
    }
-   last_file_id = -1
-   last_ptr = nil
    local options: PPOptions = opts or {}
    local refs: {any} = {}
    local state: PPState = {
       macros = {},
       macro_table = new_macro_table(4096, refs),
       macro_refs = refs,
+      macro_map = {},
       mgr = mgr,
        reporter = reporter,
        once_paths = {},
@@ -1214,8 +1225,8 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
        active = true,
        expanding = {},
        opts = options,
-       date_literal = os.date("%b %d %Y"),
-       time_literal = os.date("%H:%M:%S"),
+      date_literal = os.date("%b %d %Y"),
+      time_literal = os.date("%H:%M:%S"),
    }
    install_builtins(state)
    local defns: {string:string} | nil = options.defines
@@ -1228,7 +1239,7 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
    local undefs: {string:boolean} | nil = options.undefs
    if not undefs is nil then
       for name, _ in pairs(undefs) do
-         macro_table_delete(state.macro_table, name)
+         remove_macro(state, name)
       end
    end
    
@@ -1260,6 +1271,9 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
          
          if tok.kind == lexer.K_EOF then
             top.next() -- Consume EOF
+            if top.vec then
+               recycle_vector(top.vec)
+            end
             if top.macro_name then
                state.expanding[top.macro_name] = nil
             end
@@ -1267,12 +1281,12 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
          elseif top.is_file and tok.kind == lexer.K_PUNCT and get_lexeme(mgr, tok) == "#" then
              top.next() -- Consume '#'
              handle_directive(top, state, tok.line, stack)
-         elseif not state.active then
-             top.next()
-         elseif tok.kind == lexer.K_IDENTIFIER then
-             top.next() -- Consume identifier
-             local macro_idx = macro_index(state, tok)
-             
+      elseif not state.active then
+         top.next()
+      elseif tok.kind == lexer.K_IDENTIFIER then
+         top.next() -- Consume identifier
+         local macro_idx = macro_index(state, tok)
+         
              local macro: MacroC = nil
              if macro_idx > 0 then
                  macro = state.macros[macro_idx]
@@ -1333,6 +1347,8 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
       is_file = false,
       lexer = initial_source.lexer,
       mgr = mgr,
+      macro_name = nil,
+      vec = nil,
    }
 end
 

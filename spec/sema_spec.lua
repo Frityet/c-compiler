@@ -11,9 +11,8 @@ local function run_check(src)
    local function iter()
       return lexer.next_token(lex)
    end
-   local src_refs = { [1] = lex.src }
    local src_ptrs = { [1] = lex.src_ptr }
-   local tu = parser.parse(lex.src_ptr, iter, rep, src_ptrs, src_refs)
+   local tu = parser.parse(lex.src_ptr, iter, rep, src_ptrs)
    local checked = Checker.check(tu, rep)
    return checked, rep
 end

@@ -149,6 +149,18 @@ describe("preprocessor", function()
       assert.are.same({ "int", "myVar", "=", "1", ";", "const", "char", "*", "s", "=", "\"hello world\"", ";" }, lexemes(pp, tokens))
    end)
 
+   it("removes macros with #undef", function()
+      local rep = Reporter.new()
+      local src = table.concat({
+         "#define TEMP 42",
+         "#undef TEMP",
+         "int v = TEMP;",
+      }, "\n")
+      local pp = Preprocessor.preprocess(src, 16, rep)
+      local tokens = collect_tokens(pp)
+      assert.are.same({ "int", "v", "=", "TEMP", ";" }, lexemes(pp, tokens))
+   end)
+
    it("honors #pragma once to avoid duplicate includes", function()
       local rep = Reporter.new()
       local src = '#include "inc_once.h"\n#include "inc_once.h"\nint main();'

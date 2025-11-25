@@ -52,8 +52,21 @@ local type Uint8Ptr = ffi.CString
 
 local TokenType = ffi.typeof("tl_token_fast")
 
-local record LexerState
-   src: string
+ffi.cdef [[
+struct tl_lexer_state {
+    // const uint8_t *src;
+    const uint8_t *src_ptr;
+    uint32_t len;
+    uint32_t pos;
+    uint32_t line;
+    uint32_t col;
+    uint32_t file_id;
+    uint8_t newline_flag;
+   tl_token_fast current_token;
+};
+]]
+
+local record LexerState is ffi.CData where ffi.istype("struct tl_lexer_state", self)
    src_ptr: Uint8Ptr
    len: integer
    pos: integer
@@ -61,8 +74,12 @@ local record LexerState
    col: integer
    file_id: integer
    newline_flag: integer
+   -- current_token: ffi.Pointer<TokenC>
    current_token: TokenC
 end
+
+-- Keep source buffers alive for each lexer state; weak keys so buffers can be GC'd with the state
+local state_buffers = setmetatable({}, { __mode = "k" })
 
 -- Character Properties Lookup Table (FFI)
 local PROP_SPACE<const> = 1
@@ -246,10 +263,10 @@ end
 
 local function new_lexer(source: string, file_id: integer): LexerState
    local len = #source
+   local buf: ffi.CData = ffi.new("uint8_t[?]", len + 1, source)
 
-   return {
-      src = source,
-      src_ptr = ffi.cast("const uint8_t*", source),
+   local state: LexerState = ffi.new("struct tl_lexer_state", {
+      src_ptr = ffi.cast("const uint8_t*", buf),
       len = len,
       pos = 0,
       line = 1,
@@ -257,7 +274,9 @@ local function new_lexer(source: string, file_id: integer): LexerState
       file_id = file_id,
       newline_flag = 0,
       current_token = ffi.new(TokenType)
-   }
+   })
+   state_buffers[state] = buf
+   return state
 end
 
 local function next_token(state: LexerState): TokenC

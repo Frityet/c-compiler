@@ -11,7 +11,7 @@ local function parse_with_rep(src)
    local function iter()
       return lexer.next_token(lex)
    end
-   local tu = parser.parse(lex.src_ptr, iter, rep, { [1] = lex.src_ptr }, { [1] = lex.src })
+   local tu = parser.parse(lex.src_ptr, iter, rep, { [1] = lex.src_ptr })
    return tu, rep
 end
 

@@ -104,10 +104,6 @@ local function tok_len(tok: Token): integer
    return tok.stop - tok.start
 end
 
-local function tok_view(p: Parser, tok: Token): StringView
-   return TLStringView(tok_ptr(p, tok), tok_len(tok))
-end
-
 local function lexeme_string(p: Parser, tok: Token): string
    local refs = p.src_refs
    if refs ~= nil then
@@ -129,19 +125,23 @@ local function lexeme_string(p: Parser, tok: Token): string
    return ffi.string(tok_ptr(p, tok), tok_len(tok))
 end
 
-local function memcmp_ptr(a: ffi.CData, b: ffi.String, n: integer): integer
+local macroexp memcmp_ptr(a: ffi.CData, b: ffi.String, n: integer): integer
    return (C.memcmp as function(ffi.CData, ffi.String, integer): integer)(a, b, n)
 end
 
 local function lexeme_eq(p: Parser, tok: Token, lit: string): boolean
-   if tok_len(tok) ~= #lit then
+   local len = tok_len(tok)
+   if len ~= #lit then
       return false
    end
-   return memcmp_ptr(tok_ptr(p, tok), lit, #lit) == 0
+   local ptr = tok_ptr(p, tok)
+   return memcmp_ptr(ptr, lit, len) == 0
 end
 
-local function lexeme_is_one_of(p: Parser, tok: Token, opts: {string}): boolean
-   for _, opt in ipairs(opts) do
+local function lexeme_is_one_of(p: Parser, tok: Token, ...: string): boolean
+   local argc = select("#", ...)
+   for i = 1, argc do
+      local opt = select(i, ...)
       if lexeme_eq(p, tok, opt) then
          return true
       end
@@ -173,7 +173,7 @@ local function new_parser(src: ffi.CString, iter: TokenIterator, reporter: Repor
    }
 end
 
-local function cur(p: Parser): Token
+local macroexp cur(p: Parser): Token
    return p.current
 end
 
@@ -216,7 +216,7 @@ local function is_attribute_token(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_IDENTIFIER and tok.kind ~= TK_KEYWORD then
       return false
    end
-   return lexeme_is_one_of(p, tok, { "__attribute__", "__attribute", "__declspec", "__declspec__", "__asm", "__asm__", "asm" })
+   return lexeme_is_one_of(p, tok, "__attribute__", "__attribute", "__declspec", "__declspec__", "__asm", "__asm__", "asm")
 end
 
 local function skip_parens(p: Parser)
@@ -243,12 +243,12 @@ end
 local function skip_attributes(p: Parser)
    while true do
        local tok = cur(p)
-       if tok.kind == TK_IDENTIFIER and lexeme_is_one_of(p, tok, { "__attribute__", "__attribute", "__declspec", "__declspec__" }) then
+       if tok.kind == TK_IDENTIFIER and lexeme_is_one_of(p, tok, "__attribute__", "__attribute", "__declspec", "__declspec__") then
           advance(p)
           while at(p, TK_PUNCT, "(") do
              skip_parens(p)
           end
-       elseif tok.kind == TK_IDENTIFIER and lexeme_is_one_of(p, tok, { "__asm", "__asm__", "asm" }) then
+       elseif tok.kind == TK_IDENTIFIER and lexeme_is_one_of(p, tok, "__asm", "__asm__", "asm") then
           advance(p)
           if at(p, TK_PUNCT, "(") then
              skip_parens(p)
@@ -304,14 +304,14 @@ local function is_type_qualifier(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_KEYWORD then
       return false
    end
-   return lexeme_is_one_of(p, tok, { "const", "restrict", "volatile" })
+   return lexeme_is_one_of(p, tok, "const", "restrict", "volatile")
 end
 
 local function is_storage_class(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_KEYWORD then
       return false
    end
-   return lexeme_is_one_of(p, tok, { "typedef", "extern", "static", "auto", "register" })
+   return lexeme_is_one_of(p, tok, "typedef", "extern", "static", "auto", "register")
 end
 
 local function is_function_specifier(p: Parser, tok: Token): boolean
@@ -322,7 +322,7 @@ local function is_builtin_keyword(p: Parser, tok: Token): boolean
    if tok.kind ~= TK_KEYWORD then
       return false
    end
-   return lexeme_is_one_of(p, tok, { "void", "_Bool", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Complex", "_Imaginary" })
+   return lexeme_is_one_of(p, tok, "void", "_Bool", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Complex", "_Imaginary")
 end
 
 local function is_type_specifier_start(p: Parser, tok: Token): boolean
@@ -332,7 +332,7 @@ local function is_type_specifier_start(p: Parser, tok: Token): boolean
    if is_builtin_keyword(p, tok) or is_type_qualifier(p, tok) or is_storage_class(p, tok) or is_function_specifier(p, tok) then
       return true
    end
-   if tok.kind == TK_KEYWORD and lexeme_is_one_of(p, tok, { "struct", "union", "enum" }) then
+   if tok.kind == TK_KEYWORD and lexeme_is_one_of(p, tok, "struct", "union", "enum") then
       return true
    end
    if tok.kind == TK_IDENTIFIER then
@@ -502,7 +502,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
          local q = lexeme_eq(p, tok, "const") and "const" or lexeme_eq(p, tok, "restrict") and "restrict" or "volatile"
          table.insert(qualifiers, q as types.TypeQualifier)
          advance(p)
-      elseif tok.kind == TK_KEYWORD and lexeme_is_one_of(p, tok, { "struct", "union" }) then
+      elseif tok.kind == TK_KEYWORD and lexeme_is_one_of(p, tok, "struct", "union") then
          local spec: ast.StructSpecifier | nil = nil
          local tag_kind = lexeme_eq(p, tok, "union") and "union" or "struct"
          advance(p)
@@ -1090,12 +1090,12 @@ end
 
 parse_unary = function(p: Parser): ast.ExprNode
    local t = cur(p)
-   if t.kind == TK_PUNCT and lexeme_is_one_of(p, t, { "&", "*", "+", "-", "~", "!" }) then
+   if t.kind == TK_PUNCT and lexeme_is_one_of(p, t, "&", "*", "+", "-", "~", "!") then
       advance(p)
       local operand = parse_unary(p)
       local span = t:span():merge(operand.span)
       return { kind = "unary", span = span, op = t, operand = operand, postfix = false } 
-   elseif t.kind == TK_PUNCT and lexeme_is_one_of(p, t, { "++", "--" }) then
+   elseif t.kind == TK_PUNCT and lexeme_is_one_of(p, t, "++", "--") then
       advance(p)
       local operand = parse_unary(p)
       local span = t:span():merge(operand.span)
