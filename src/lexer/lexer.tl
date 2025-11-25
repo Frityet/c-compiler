@@ -545,16 +545,19 @@ local record StringView is ffi.CData where ffi.istype("struct tl_string_view", s
    metamethod __eq: function(self, other: ffi.CData): boolean
    metamethod __eq: function(self, other: string): boolean
    metamethod __len: function(self): integer = macroexp(self: self): integer return self.len end
+   metamethod __concat: function(self, other: string): string
 end
 
 ffi.metatype("struct tl_string_view", {
    __tostring = function(self: StringView): string
       return ffi.string(self.ptr, self.len)
    end,
-   __eq = function(self: StringView, other: ffi.String): boolean
+   __eq = function(self: StringView, other: ffi.CString | string | StringView): boolean
       local other_len: integer
       if other is string then
          other_len = #other
+      elseif other is StringView then
+         other_len = other.len
       else
          other_len = (C.strlen as function(ffi.CData): integer)(other)
       end
@@ -562,12 +565,17 @@ ffi.metatype("struct tl_string_view", {
       if self.len ~= other_len then
          return false
       end
-      return (C.memcmp as function(ffi.CData, ffi.String, integer))(self.ptr, other, self.len) == 0
+      return (C.memcmp as function(ffi.CData, ffi.CData | string, integer))(self.ptr, other, self.len) == 0
+   end,
+
+   __concat = function(self: string | StringView, other: string | StringView): string
+      return tostring(self)..tostring(other)
    end,
 })
 
-function TokenC:lexeme(src: ffi.CString): string
-   return ffi.string(src + self.start, self.stop - self.start)
+function TokenC:lexeme(src: ffi.CString): StringView
+   return ffi.new("struct tl_string_view", src + self.start, self.stop - self.start)
+   -- return ffi.string(src + self.start, self.stop - self.start)
 end
 
 function TokenC:span(): Span

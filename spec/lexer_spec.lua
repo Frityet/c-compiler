@@ -1,6 +1,7 @@
 package.path = "build/?.lua;build/?/init.lua;src/?.lua;src/?/init.lua;" .. package.path
 
 local lexer = require("lexer.lexer")
+local ffi = require("ffi")
 
 local function collect_tokens(src, file_id)
    local state = lexer.new_lexer(src, file_id)
@@ -13,6 +14,10 @@ local function collect_tokens(src, file_id)
       end
    end
    return state, tokens
+end
+
+local function view_to_string(v)
+   return ffi.string(v.ptr, v.len)
 end
 
 describe("lexer", function()
@@ -45,7 +50,7 @@ describe("lexer wide/string prefixes", function()
       for _, t in ipairs(tokens) do
          table.insert(kinds, t.kind)
          if t.kind == lexer.K_EOF then break end
-         table.insert(lexemes, lexer.lexeme(t, state.src_ptr))
+         table.insert(lexemes, view_to_string(lexer.lexeme(t, state.src_ptr)))
       end
       assert.are.same({ lexer.K_STRING, lexer.K_CHAR, lexer.K_EOF }, { kinds[1], kinds[2], kinds[#kinds] })
       assert.are.equal('L"hello"', lexemes[1])

@@ -3,6 +3,7 @@ package.path = "build/?.lua;build/?/init.lua;src/?.lua;src/?/init.lua;" .. packa
 local parser = require("parser.parser")
 local lexer = require("lexer.lexer")
 local Reporter = require("diag.reporter")
+local ffi = require("ffi")
 
 local function parse_with_rep(src)
    local rep = Reporter.new()
@@ -10,8 +11,13 @@ local function parse_with_rep(src)
    local function iter()
       return lexer.next_token(lex)
    end
-   local tu = parser.parse(lex.src_ptr, iter, rep)
+   local tu = parser.parse(lex.src_ptr, iter, rep, { [1] = lex.src_ptr }, { [1] = lex.src })
    return tu, rep
+end
+
+local function lexeme_str(tok, src_ptr)
+   local view = tok:lexeme(src_ptr)
+   return ffi.string(view.ptr, view.len)
 end
 
 describe("parser complex declarators", function()
@@ -40,10 +46,10 @@ describe("parser complex declarators", function()
       local arr_outer = ret_ptr.to
       assert.are.equal("array", arr_outer.tag)
       assert.is_true(arr_outer.is_static)
-      assert.are.equal("3", arr_outer.size_expr.token:lexeme(tu.src_ptr))
+      assert.are.equal("3", lexeme_str(arr_outer.size_expr.token, tu.src_ptr))
       local arr_inner = arr_outer.of
       assert.are.equal("array", arr_inner.tag)
-      assert.are.equal("4", arr_inner.size_expr.token:lexeme(tu.src_ptr))
+      assert.are.equal("4", lexeme_str(arr_inner.size_expr.token, tu.src_ptr))
       assert.are.equal("builtin", arr_inner.of.tag)
       assert.are.equal("int", arr_inner.of.name)
    end)
@@ -55,11 +61,11 @@ describe("parser complex declarators", function()
       local arr = func.type.params[3].type
       assert.are.equal("array", arr.tag)
       assert.are.equal("identifier", arr.size_expr.kind)
-      assert.are.equal("m", arr.size_expr.name:lexeme(tu.src_ptr))
+      assert.are.equal("m", lexeme_str(arr.size_expr.name, tu.src_ptr))
       local inner = arr.of
       assert.are.equal("array", inner.tag)
       assert.are.equal("identifier", inner.size_expr.kind)
-      assert.are.equal("n", inner.size_expr.name:lexeme(tu.src_ptr))
+      assert.are.equal("n", lexeme_str(inner.size_expr.name, tu.src_ptr))
       assert.are.equal("builtin", inner.of.tag)
       assert.are.equal("double", inner.of.name)
    end)

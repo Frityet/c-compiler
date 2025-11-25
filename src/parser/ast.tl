@@ -522,6 +522,8 @@ local type DeclNode = VarDecl | FuncDecl | TypedefDecl | TagDecl
 
 local record TranslationUnit
    src_ptr: ffi.CString
+   src_refs: {integer: string} | nil
+   src_ptrs: {integer: ffi.CString} | nil
    decls: {DeclNode}
 end
 

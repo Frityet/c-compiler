@@ -3,11 +3,11 @@ local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local Span = require("util.span")
 local LexerFast = require("lexer.lexer")
+local ffi = require("ffi")
 local scopes = require("sema.scopes")
 local symbols = require("sema.symbols")
 local types = require("sema.types")
 local type_ops_raw = require("sema.type_ops")
-local ffi = require("ffi")
 local type TypeCtx = type_ops_raw.TypeCtx
 
 local function qualifier_span(ty: types.TypeNode): Span
@@ -15,6 +15,8 @@ local function qualifier_span(ty: types.TypeNode): Span
 end
 
 local type TranslationUnit = ast.TranslationUnit
+local type Token = LexerFast.Token
+local type BytePtr = ffi.Pointer<ffi.CInteger>
 local type Scope = scopes.Scope
 local type Symbol = symbols.Symbol
 
@@ -39,6 +41,8 @@ end
 local record Context is TypeCtx
    rep: Reporter
    src_ptr: ffi.CString
+   src_ptrs: {integer: ffi.CString} | nil
+   src_refs: {integer: string} | nil
    globals: Scope
    scope: Scope
    expr_info: {types.ExpressionRef: ExprInfo}
@@ -50,6 +54,19 @@ local record Context is TypeCtx
    switch_stack: {SwitchContext}
    labels_defined: {string: Span}
    labels_used: {string: Span}
+end
+
+local function tok_lexeme(ctx: Context, tok: Token): string
+   local base: ffi.CString = ctx.src_ptr
+   local ptrs = ctx.src_ptrs
+   if ptrs ~= nil then
+      local map = ptrs as {integer: ffi.CString}
+      local alt: ffi.CString | nil = map[tok.file_id]
+      if alt ~= nil then base = alt end
+   end
+   local ptr: BytePtr = ffi.cast("const uint8_t*", base)
+   ptr = ptr + tok.start
+   return ffi.string(ptr, tok.stop - tok.start)
 end
 
 local function resolve_type(ctx: Context, ty: types.TypeNode, seen?: {string:boolean}): types.TypeNode
@@ -267,7 +284,7 @@ local function validate_array_param(ctx: Context, arr: types.ArrayType)
          ctx.rep:report(Diagnostic.new("error", "static array parameter requires a constant bound", arr.span, "SEM011"))
          return
       end
-      local num = tonumber(sz.token:lexeme(ctx.src_ptr))
+      local num = tonumber(tok_lexeme(ctx, sz.token))
       if num is nil or num <= 0 then
          ctx.rep:report(Diagnostic.new("error", "static array parameter bound must be a positive constant", arr.span, "SEM012"))
       end
@@ -487,7 +504,7 @@ local check_stmt: function(ctx: Context, stmt: ast.StmtNode)
 local process_decl: function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean)
 
 local function number_literal_type(ctx: Context, tok: LexerFast.Token): types.BuiltinType
-   local lex = tok:lexeme(ctx.src_ptr)
+   local lex = tostring(tok_lexeme(ctx, tok))
    if lex:find("%.") or lex:find("[eE]") then
       return make_builtin("double", tok:span(), true)
    end
@@ -639,7 +656,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
    local expr_span = expr.span
    if expr is ast.NumberLiteralExpr then
       local ty = number_literal_type(ctx, expr.token)
-      local value = tonumber(expr.token:lexeme(ctx.src_ptr))
+      local value = tonumber(tok_lexeme(ctx, expr.token))
       local intval: integer | nil = nil
       if value then
          intval = math.floor(value)
@@ -649,7 +666,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
       return info
    elseif expr is ast.CharLiteralExpr then
       local ty = make_builtin("int", expr.span, true)
-      local num = tonumber(expr.token:lexeme(ctx.src_ptr))
+      local num = tonumber(tok_lexeme(ctx, expr.token))
       local cint: integer | nil = nil
       if num then
          cint = math.floor(num)
@@ -661,7 +678,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
       local len = 0
       if #expr.parts > 0 then
          local tok = expr.parts[1]
-         len = math.max(0, #tok:lexeme(ctx.src_ptr) - 2) + 1
+         len = math.max(0, #tok_lexeme(ctx, tok) - 2) + 1
       end
       local char_ty = make_builtin("char", expr.span, true)
       local const_char = wrap_qualified(char_ty, { "const" })
@@ -679,7 +696,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
       record_expr(ctx, expr, info)
       return info
    elseif expr is ast.IdentifierExpr then
-      local name = expr.name:lexeme(ctx.src_ptr)
+      local name = tok_lexeme(ctx, expr.name)
       local sym = ctx.scope:lookup(name)
       if sym is nil then
          ctx.rep:report(Diagnostic.new("error", string.format("use of undeclared identifier '%s'", name), expr.span, "SEM020"))
@@ -713,7 +730,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
       return info
    elseif expr is ast.UnaryExpr then
       local operand = check_expr(ctx, expr.operand)
-      local op = expr.op:lexeme(ctx.src_ptr)
+      local op = tok_lexeme(ctx, expr.op)
       local op_type = operand.type
       if op == "&" then
          local resolved_op = resolve_type(ctx, op_type)
@@ -769,7 +786,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
    elseif expr is ast.BinaryExpr then
       local lhs = check_expr(ctx, expr.lhs)
       local rhs = check_expr(ctx, expr.rhs)
-      local op = expr.op:lexeme(ctx.src_ptr)
+      local op = tok_lexeme(ctx, expr.op)
       if op == "+" or op == "-" then
          local ldecay = decay_for_value(ctx, lhs.type)
          local rdecay = decay_for_value(ctx, rhs.type)
@@ -945,7 +962,7 @@ check_expr = function(ctx: Context, expr: ast.ExprNode): ExprInfo
          record_expr(ctx, expr, info)
          return info
       end
-      local field = find_field(base, expr.field:lexeme(ctx.src_ptr))
+      local field = find_field(base, tok_lexeme(ctx, expr.field))
       if field is nil then
          ctx.rep:report(Diagnostic.new("error", "no such field in struct/union", expr.span, "SEM027"))
          local info: ExprInfo = { type = resolved, is_lvalue = false, is_constant = false, const_value = nil }
@@ -1140,9 +1157,9 @@ check_stmt = function(ctx: Context, stmt: ast.StmtNode)
          ctx.rep:report(Diagnostic.new("error", "continue statement not within a loop", stmt.span, "SEM021"))
       end
    elseif stmt is ast.GotoStmt then
-      ctx.labels_used[stmt.name:lexeme(ctx.src_ptr)] = stmt.span
+      ctx.labels_used[tok_lexeme(ctx, stmt.name)] = stmt.span
    elseif stmt is ast.LabelStmt then
-      local nm = stmt.name:lexeme(ctx.src_ptr)
+      local nm = tok_lexeme(ctx, stmt.name)
       if ctx.labels_defined[nm] then
          ctx.rep:report(Diagnostic.new("error", "duplicate label", stmt.span, "SEM023"))
       else
@@ -1181,7 +1198,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          ctx.rep:report(Diagnostic.new("error", "incomplete type in definition", decl.span, "SEM031"))
       end
       local sym: symbols.Object = {
-         name = name_tok:lexeme(ctx.src_ptr),
+         name = tok_lexeme(ctx, name_tok),
          kind = "object",
          type = decl.type,
          storage = storage,
@@ -1212,7 +1229,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
          fn_type = fn_ty_node
       end
       local sym: symbols.Function = {
-         name = name_tok:lexeme(ctx.src_ptr),
+         name = tok_lexeme(ctx, name_tok),
          kind = "function",
          type = decl.type,
          storage = has_storage(specs, "static") and "static" or nil,
@@ -1282,7 +1299,7 @@ process_decl = function(ctx: Context, decl: ast.DeclNode, is_file_scope: boolean
       collect_tags(ctx, decl.type, nil)
 
       local sym: symbols.TypeDef = {
-         name = name_tok:lexeme(ctx.src_ptr),
+         name = tok_lexeme(ctx, name_tok),
          kind = "typedef",
          type = decl.type,
          -- storage = nil,
@@ -1308,6 +1325,8 @@ local function check(tu: TranslationUnit, reporter?: Reporter, opts?: CheckOptio
    local ctx: Context = {
       rep = rep,
       src_ptr = tu.src_ptr,
+      src_ptrs = tu.src_ptrs,
+      src_refs = tu.src_refs,
       globals = global_scope,
       scope = global_scope,
       expr_info = {},

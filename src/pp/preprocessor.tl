@@ -22,7 +22,7 @@ end
 
 local record SourceManager
    sources: {integer:string}
-   ptrs: {integer:ffi.Pointer<integer>} -- uint8_t*
+   ptrs: {integer:ffi.CString}
    paths: {integer:string}
    infos: {integer: SourceInfo}
    next_id: integer
@@ -43,10 +43,10 @@ local record PPOptions
 end
 
 local last_file_id = -1
-local last_ptr: ffi.Pointer<integer> = nil
+local last_ptr: ffi.CString = nil
 
 local function get_lexeme(mgr: SourceManager, tok: lexer.Token): string
-   local ptr: ffi.Pointer<integer>
+   local ptr: ffi.CString
    if tok.file_id == last_file_id and last_ptr then
       ptr = last_ptr
    else
@@ -234,7 +234,7 @@ end
 
 local function macro_index(state: PPState, tok: lexer.Token): integer
    local mgr = state.mgr
-   local ptr: ffi.Pointer<integer>
+   local ptr: ffi.CString
    if tok.file_id == last_file_id and last_ptr then
       ptr = last_ptr
    else
@@ -243,7 +243,8 @@ local function macro_index(state: PPState, tok: lexer.Token): integer
       last_ptr = ptr
    end
    if ptr then
-      return macro_table_get(state.macro_table, ptr + tok.start, tok.stop - tok.start)
+      local base: ffi.Pointer<integer> = ffi.cast("const uint8_t*", ptr)
+      return macro_table_get(state.macro_table, base + tok.start, tok.stop - tok.start)
    end
    return 0
 end
@@ -262,7 +263,7 @@ local ffi_copy<const> = ffi.copy
 
 local function register_source(mgr: SourceManager, file_id: integer, src: string, path: string | nil)
    mgr.sources[file_id] = src
-   mgr.ptrs[file_id] = ffi.cast("uint8_t*", ffi.cast("const uint8_t*", src))
+   mgr.ptrs[file_id] = ffi.cast("const char*", src)
    mgr.paths[file_id] = path or mgr.paths[file_id] or ""
    if mgr.infos[file_id] == nil then
       mgr.infos[file_id] = { path = mgr.paths[file_id] or "", line_delta = 0 }

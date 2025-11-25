@@ -128,10 +128,12 @@ local function compile_file(path: string, file_id: integer, opts?: PipelineOptio
    }]])
 
    local lex = pp.lexer
-   if lex is nil then
+   local mgr = pp.mgr
+   if lex is nil or mgr is nil then
       rep:report(Diagnostic.new("error", "preprocessor failed to return lexer state", Span.new(file_id, 0, 0, 1, 1), "DRV002"))
       return nil
    end
+   local ptrs = mgr.ptrs
 
    local need_tokens = options.dump_tokens
    local need_text = options.want_pp_output
@@ -139,7 +141,7 @@ local function compile_file(path: string, file_id: integer, opts?: PipelineOptio
    local wrapped = wrap_iterator(lex, pp.next, need_tokens, need_text)
    -- local iter = wrapped.iter
 
-   local tu: TranslationUnit = Parser.parse(lex.src_ptr, pp.next, rep)
+   local tu: TranslationUnit = Parser.parse(lex.src_ptr, pp.next, rep, ptrs, mgr.sources)
 
    local checked = Checker.check(tu, rep)
    -- if need_tokens then

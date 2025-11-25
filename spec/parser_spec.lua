@@ -3,6 +3,7 @@ package.path = "build/?.lua;build/?/init.lua;src/?.lua;src/?/init.lua;" .. packa
 local parser = require("parser.parser")
 local lexer = require("lexer.lexer")
 local Reporter = require("diag.reporter")
+local ffi = require("ffi")
 
 local function parse_with_rep(src)
    local rep = Reporter.new()
@@ -10,8 +11,13 @@ local function parse_with_rep(src)
    local function iter()
       return lexer.next_token(lex)
    end
-   local tu = parser.parse(lex.src_ptr, iter, rep)
+   local tu = parser.parse(lex.src_ptr, iter, rep, { [1] = lex.src_ptr }, { [1] = lex.src })
    return tu, rep
+end
+
+local function lexeme_str(tok, src_ptr)
+   local view = tok:lexeme(src_ptr)
+   return ffi.string(view.ptr, view.len)
 end
 
 describe("parser", function()
@@ -21,7 +27,7 @@ describe("parser", function()
       assert.are.equal(1, #tu.decls)
       local f = tu.decls[1]
       assert.are.equal("func", f.kind)
-      assert.are.equal("main", f.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("main", lexeme_str(f.declarator.name, tu.src_ptr))
       assert.is_not_nil(f.body)
    end)
 
@@ -32,11 +38,11 @@ describe("parser", function()
 
       local td = tu.decls[1]
       assert.are.equal("typedef", td.kind)
-      assert.are.equal("T", td.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("T", lexeme_str(td.declarator.name, tu.src_ptr))
 
       local var = tu.decls[2]
       assert.are.equal("var", var.kind)
-      assert.are.equal("value", var.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("value", lexeme_str(var.declarator.name, tu.src_ptr))
       assert.are.equal("typedef", var.type.tag)
       assert.are.equal("T", var.type.name)
    end)
@@ -54,7 +60,7 @@ describe("parser", function()
       local arr_decl = tu.decls[2]
       assert.are.equal("array", arr_decl.type.tag)
       assert.is_not_nil(arr_decl.type.size_expr)
-      assert.are.equal("3", arr_decl.type.size_expr.token:lexeme(tu.src_ptr))
+      assert.are.equal("3", lexeme_str(arr_decl.type.size_expr.token, tu.src_ptr))
    end)
 
    it("parses struct definitions with declarators", function()
@@ -78,7 +84,7 @@ describe("parser", function()
 
       local func = tu.decls[1]
       assert.are.equal("func", func.kind)
-      assert.are.equal("add", func.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("add", lexeme_str(func.declarator.name, tu.src_ptr))
       assert.are.equal("function", func.type.tag)
       assert.are.equal(2, #func.type.params)
       assert.are.equal("a", func.type.params[1].name)
@@ -95,7 +101,7 @@ describe("parser", function()
       assert.are.equal("list", var.init.kind)
       assert.are.equal(2, #var.init.entries)
       assert.are.equal("number_literal", var.init.entries[1].value.expr.kind)
-      assert.are.equal("1", var.init.entries[1].value.expr.token:lexeme(tu.src_ptr))
+      assert.are.equal("1", lexeme_str(var.init.entries[1].value.expr.token, tu.src_ptr))
    end)
 
    it("parses for loops with declarations", function()
@@ -108,7 +114,7 @@ describe("parser", function()
       assert.are.equal("for", stmt.kind)
       assert.are.equal("decl", stmt.init.kind)
       local loop_decl = stmt.init.decls[1]
-      assert.are.equal("i", loop_decl.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("i", lexeme_str(loop_decl.declarator.name, tu.src_ptr))
    end)
 
    it("parses function pointer declarators", function()
@@ -146,7 +152,7 @@ int b;
       assert.are.equal(1, #tu.decls)
       local func = tu.decls[1]
       assert.are.equal("func", func.kind)
-      assert.are.equal("add", func.declarator.name:lexeme(tu.src_ptr))
+      assert.are.equal("add", lexeme_str(func.declarator.name, tu.src_ptr))
       assert.is_not_nil(func.body)
       -- old-style params should have been captured
       assert.is_true(#func.old_param_decls > 0)

@@ -5,6 +5,7 @@ local Reporter = require("diag.reporter")
 local LexerFast = require("lexer.lexer")
 local Target = require("util.target")
 local Diagnostic = require("diag.diagnostics")
+local ffi = require("ffi")
 local types = require("sema.types")
 local ast = require("parser.ast")
 local fs = require("util.fs")
@@ -54,6 +55,10 @@ end
 local function default_output(headers: {string}): string
    local first = headers[1] or "ffi"
    return basename_no_ext(first) .. ".ffi.tl"
+end
+
+local function tok_str(tok: Token, src: ffi.CString): string
+   return ffi.string(src + tok.start, tok.stop - tok.start)
 end
 
 local HOST_TARGET = Target.detect()
@@ -542,9 +547,9 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
       end
       if d is ast.FuncDecl then
          local name_tok = d.declarator.name
-         if not name_tok is nil then
-            local tok: Token = name_tok
-            local name = tok:lexeme(tu.src_ptr)
+      if not name_tok is nil then
+         local tok: Token = name_tok
+         local name = tok_str(tok, tu.src_ptr)
             if not has_storage(d.specifiers, "static") then
                local existing = col.functions[name]
                if existing is nil then
@@ -557,9 +562,9 @@ local function collect(col: Collected, tu: TranslationUnit, rep: Reporter, skip_
          collect_type_defs(col, d.type)
       elseif d is ast.TypedefDecl then
          local name_tok = d.declarator.name
-         if not name_tok is nil then
-            local tok: Token = name_tok
-            local nm = tok:lexeme(tu.src_ptr)
+      if not name_tok is nil then
+         local tok: Token = name_tok
+         local nm = tok_str(tok, tu.src_ptr)
             local existing_td = col.typedefs[nm]
             if existing_td is nil then
                col.typedefs[nm] = d.type
@@ -1046,10 +1051,11 @@ local function generate(opts: GenerateOptions, reporter?: Reporter, writer?: fun
       no_system_paths = false,
       }]])
       local lex = pp.lexer
-      if lex is nil then
+      local mgr = pp.mgr
+      if lex is nil or mgr is nil then
          return nil
       end
-      local tu = Parser.parse(lex.src_ptr, pp.next, rep)
+      local tu = Parser.parse(lex.src_ptr, pp.next, rep, mgr.ptrs, mgr.sources)
       local checked = Checker.check(tu, rep, { allow_incomplete_params = true })
       collect(col, checked.tu, rep, opts.ignore_system_includes or false, allow)
    end
