@@ -2,6 +2,4 @@
 collectgarbage("stop")
 collectgarbage("stop")
 
-local cli = require("driver.cli")
-
-cli.run(arg)
+require("driver.cli").run(arg)

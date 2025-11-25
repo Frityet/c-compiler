@@ -149,9 +149,53 @@ int strlen(const char *s);
 ]]
 local C = ffi.C
 
-local macroexp is_kw(s: Uint8Ptr, kw: string, kwlen: integer): boolean
-   return (C.memcmp as function(ffi.CData, ffi.String, integer))(s, kw, kwlen) == 0
+local macro is_kw!(s: Expression, kw: Expression): Expression
+   expect(s, "variable")
+   expect(kw, "string")
+
+   local kwlen = #kw.conststr
+   local n = block("integer")
+   n.constnum = kwlen
+   n.tk = tostring(kwlen)
+
+   return `(C.memcmp as function(ffi.CData, ffi.String, integer))($s, $kw, $n) == 0`
 end
+
+local macro char!(x: Expression): Expression
+   expect(x, "string")
+
+   local n = block("integer")
+   n.constnum = string.byte(x.conststr, 1)
+   return n
+end
+
+--x should be `<var> == <LIT>`
+local macro expand_cmp!(x: Expression): Expression
+   expect(x, "op_eq")
+   expect(x[1], "variable")
+   expect(x[2], "string")
+
+   local var, str = x[1], x[2]
+   local char = string.byte(str.conststr, 1)
+   local char_node = block("integer")
+   char_node.constnum = char
+   char_node.tk = tostring(char)
+   local i_blk = block("integer")
+   i_blk.constnum = 0
+   i_blk.tk = "0"
+   local expr = `($var)[$i_blk] == $char_node`
+   for i = 2, #x[2].conststr do
+      i_blk.constnum = i-1
+      i_blk.tk = tostring(i-1)
+
+      char_node.constnum = string.byte(str.conststr, i)
+      char_node.tk = tostring(char_node.constnum)
+
+      expr = `$expr and ($var)[$i_blk] == $char_node`
+   end
+   return expr
+end
+
 
 local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
    if len < 2 or len > 15 then
@@ -159,106 +203,188 @@ local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
    end
 
    local c0 = s[0]
+   if c0 == char! '_' then
+      if len == 5 then
+         return expand_cmp!(s == '_Bool')
+      elseif len == 8 then
+         return is_kw!(s, "_Complex") or is_kw!(s, "_Atomic")
+      elseif len == 10 then
+         return is_kw!(s, "_Alignas") or is_kw!(s, "_Alignof") or is_kw!(s, "_Noreturn")
+      elseif len == 14 then
+         return is_kw!(s, "_Static_assert")
+      elseif len == 13 then
+         return is_kw!(s, "_Thread_local")
+      else
+         return false
+      end
+   end
 
-   -- len == 2
    if len == 2 then
-      local c1 = s[1]
-      return (c0 == 100 and c1 == 111) or      -- do
-             (c0 == 105 and c1 == 102)         -- if
-
-   -- len == 3
+      return expand_cmp!(s == 'do') or expand_cmp!(s == "if")
    elseif len == 3 then
-      return (c0 == 102 and s[1] == 111 and s[2] == 114) or  -- for
-             (c0 == 105 and s[1] == 110 and s[2] == 116)     -- int
-
-   -- len == 4
+      return expand_cmp!(s == "for") or expand_cmp!(s == "int")
    elseif len == 4 then
-      local c1, c2, c3 = s[1], s[2], s[3]
-      -- auto / case / char / else / enum / goto / long / void
-      if c0 == 97 then         -- 'a'
-         return c1 == 117 and c2 == 116 and c3 == 111         -- auto
-      elseif c0 == 99 then     -- 'c'
-         return (c1 == 97 and c2 == 115 and c3 == 101) or     -- case
-                (c1 == 104 and c2 == 97 and c3 == 114)        -- char
-      elseif c0 == 101 then    -- 'e'
-         return (c1 == 108 and c2 == 115 and c3 == 101) or    -- else
-                (c1 == 110 and c2 == 117 and c3 == 109)       -- enum
-      elseif c0 == 103 then    -- 'g'
-         return c1 == 111 and c2 == 116 and c3 == 111         -- goto
-      elseif c0 == 108 then    -- 'l'
-         return c1 == 111 and c2 == 110 and c3 == 103         -- long
-      elseif c0 == 118 then    -- 'v'
-         return c1 == 111 and c2 == 105 and c3 == 100         -- void
+      if c0 == char!'a' then
+         return expand_cmp!(s == "auto")
+      elseif c0 == char!'c' then
+         return expand_cmp!(s == "case") or expand_cmp!(s == "char")
+      elseif c0 == char!'e' then
+         return expand_cmp!(s == "else") or expand_cmp!(s == "enum")
+      elseif c0 == char!'g' then
+         return expand_cmp!(s == "goto")
+      elseif c0 == char!'l' then
+         return expand_cmp!(s == "long")
+      elseif c0 == char!'v' then
+         return expand_cmp!(s == "void")
       else
          return false
       end
-
-   -- len == 5
    elseif len == 5 then
-      local c1, c2, c3, c4 = s[1], s[2], s[3], s[4]
-      return (c0 == 98 and c1 == 114 and c2 == 101 and c3 == 97 and c4 == 107) or -- break
-             (c0 == 99 and c1 == 111 and c2 == 110 and c3 == 115 and c4 == 116) or -- const
-             (c0 == 102 and c1 == 108 and c2 == 111 and c3 == 97 and c4 == 116) or -- float
-             (c0 == 115 and c1 == 104 and c2 == 111 and c3 == 114 and c4 == 116) or -- short
-             (c0 == 119 and c1 == 104 and c2 == 105 and c3 == 108 and c4 == 101)    -- while
-
-   -- len == 6
+      return expand_cmp!(s == "break") or expand_cmp!(s == "const") or
+             expand_cmp!(s == "float") or expand_cmp!(s == "short") or
+             expand_cmp!(s == "while")
+   --use regular `is_kw` for longer keywords
    elseif len == 6 then
-      -- double, extern, return, sizeof, static, struct, switch, inline
-      if c0 == 100 then
-         return is_kw(s, "double", 6)
-      elseif c0 == 101 then
-         return is_kw(s, "extern", 6)
-      elseif c0 == 114 then
-         return is_kw(s, "return", 6)
-      elseif c0 == 115 then
-         return is_kw(s, "sizeof", 6) or is_kw(s, "static", 6) or is_kw(s, "struct", 6) or is_kw(s, "switch", 6)
-      elseif c0 == 105 then
-         return is_kw(s, "inline", 6)
+      if c0 == char!'d' then
+         return is_kw!(s, "double")
+      elseif c0 == char!'e' then
+         return is_kw!(s, "extern")
+      elseif c0 == char!'r' then
+         return is_kw!(s, "return")
+      elseif c0 == char!'s' then
+         return is_kw!(s, "sizeof") or is_kw!(s, "static") or is_kw!(s, "struct") or is_kw!(s, "switch")
+      elseif c0 == char!'i' then
+         return is_kw!(s, "inline")
       else
          return false
       end
-
-   -- len == 7
    elseif len == 7 then
-      -- typedef, volatile
-      if c0 == 116 then
-         return is_kw(s, "typedef", 7)
-      elseif c0 == 118 then
-         return is_kw(s, "volatile", 7)
+      if c0 == char!'t' then
+         return is_kw!(s, "typedef")
+      elseif c0 == char!'v' then
+         return is_kw!(s, "volatile")
       else
          return false
       end
-
-   -- len == 8
    elseif len == 8 then
-      -- continue, register, unsigned, _Complex, _Atomic
-      if c0 == 99 then
-         return is_kw(s, "continue", 8)
-      elseif c0 == 114 then
-         return is_kw(s, "register", 8)
-      elseif c0 == 117 then
-         return is_kw(s, "unsigned", 8)
-      elseif c0 == 95 then
-         return is_kw(s, "_Complex", 8) or is_kw(s, "_Atomic", 8)
+      if c0 == char!'c' then
+         return is_kw!(s, "continue")
+      elseif c0 == char!'r' then
+         return is_kw!(s, "register")
+      elseif c0 == char!'u' then
+         return is_kw!(s, "unsigned")
       else
          return false
       end
-
-   -- len == 9, 10, 11, 12, 13, etc.
-   elseif len == 5 and c0 == 95 then
-      return is_kw(s, "_Bool", 5)
-   elseif len == 10 and c0 == 95 then
-      -- _Alignas, _Alignof, _Noreturn
-      return is_kw(s, "_Alignas", 8) or is_kw(s, "_Alignof", 8) or is_kw(s, "_Noreturn", 9)
-   elseif len == 14 then
-      return is_kw(s, "_Static_assert", 14)
-   elseif len == 13 then
-      return is_kw(s, "_Thread_local", 13)
-   else
-      return false
    end
 end
+
+-- local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
+--    if len < 2 or len > 15 then
+--       return false
+--    end
+
+--    local c0 = s[0]
+
+--    -- len == 2
+--    if len == 2 then
+--       local c1 = s[1]
+--       return (c0 == 100 and c1 == 111) or      -- do
+--              (c0 == 105 and c1 == 102)         -- if
+
+--    -- len == 3
+--    elseif len == 3 then
+--       return (c0 == 102 and s[1] == 111 and s[2] == 114) or  -- for
+--              (c0 == 105 and s[1] == 110 and s[2] == 116)     -- int
+
+--    -- len == 4
+--    elseif len == 4 then
+--       local c1, c2, c3 = s[1], s[2], s[3]
+--       -- auto / case / char / else / enum / goto / long / void
+--       if c0 == 97 then         -- 'a'
+--          return c1 == 117 and c2 == 116 and c3 == 111         -- auto
+--       elseif c0 == 99 then     -- 'c'
+--          return (c1 == 97 and c2 == 115 and c3 == 101) or     -- case
+--                 (c1 == 104 and c2 == 97 and c3 == 114)        -- char
+--       elseif c0 == 101 then    -- 'e'
+--          return (c1 == 108 and c2 == 115 and c3 == 101) or    -- else
+--                 (c1 == 110 and c2 == 117 and c3 == 109)       -- enum
+--       elseif c0 == 103 then    -- 'g'
+--          return c1 == 111 and c2 == 116 and c3 == 111         -- goto
+--       elseif c0 == 108 then    -- 'l'
+--          return c1 == 111 and c2 == 110 and c3 == 103         -- long
+--       elseif c0 == 118 then    -- 'v'
+--          return c1 == 111 and c2 == 105 and c3 == 100         -- void
+--       else
+--          return false
+--       end
+
+--    -- len == 5
+--    elseif len == 5 then
+--       local c1, c2, c3, c4 = s[1], s[2], s[3], s[4]
+--       return (c0 == 98 and c1 == 114 and c2 == 101 and c3 == 97 and c4 == 107) or -- break
+--              (c0 == 99 and c1 == 111 and c2 == 110 and c3 == 115 and c4 == 116) or -- const
+--              (c0 == 102 and c1 == 108 and c2 == 111 and c3 == 97 and c4 == 116) or -- float
+--              (c0 == 115 and c1 == 104 and c2 == 111 and c3 == 114 and c4 == 116) or -- short
+--              (c0 == 119 and c1 == 104 and c2 == 105 and c3 == 108 and c4 == 101)    -- while
+
+--    -- len == 6
+--    elseif len == 6 then
+--       -- double, extern, return, sizeof, static, struct, switch, inline
+--       if c0 == 100 then
+--          return is_kw!(s, "double", 6)
+--       elseif c0 == 101 then
+--          return is_kw!(s, "extern", 6)
+--       elseif c0 == 114 then
+--          return is_kw!(s, "return", 6)
+--       elseif c0 == 115 then
+--          return is_kw!(s, "sizeof", 6) or is_kw!(s, "static", 6) or is_kw!(s, "struct", 6) or is_kw!(s, "switch", 6)
+--       elseif c0 == 105 then
+--          return is_kw!(s, "inline", 6)
+--       else
+--          return false
+--       end
+
+--    -- len == 7
+--    elseif len == 7 then
+--       -- typedef, volatile
+--       if c0 == 116 then
+--          return is_kw!(s, "typedef", 7)
+--       elseif c0 == 118 then
+--          return is_kw!(s, "volatile", 7)
+--       else
+--          return false
+--       end
+
+--    -- len == 8
+--    elseif len == 8 then
+--       -- continue, register, unsigned, _Complex, _Atomic
+--       if c0 == 99 then
+--          return is_kw!(s, "continue", 8)
+--       elseif c0 == 114 then
+--          return is_kw!(s, "register", 8)
+--       elseif c0 == 117 then
+--          return is_kw!(s, "unsigned", 8)
+--       elseif c0 == 95 then
+--          return is_kw!(s, "_Complex", 8) or is_kw!(s, "_Atomic", 8)
+--       else
+--          return false
+--    end
+
+--    -- len == 9, 10, 11, 12, 13, etc.
+--    elseif len == 5 and c0 == 95 then
+--       return is_kw!(s, "_Bool", 5)
+--    elseif len == 10 and c0 == 95 then
+--       -- _Alignas, _Alignof, _Noreturn
+--       return is_kw!(s, "_Alignas", 8) or is_kw!(s, "_Alignof", 8) or is_kw!(s, "_Noreturn", 9)
+--    elseif len == 14 then
+--       return is_kw!(s, "_Static_assert", 14)
+--    elseif len == 13 then
+--       return is_kw!(s, "_Thread_local", 13)
+--    else
+--       return false
+--    end
+-- end
 
 
 local function new_lexer(source: string, file_id: integer): LexerState
