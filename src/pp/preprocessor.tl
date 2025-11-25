@@ -206,6 +206,11 @@ local function macro_table_delete(t: MacroTable, key: string)
     end
 end
 
+local TRIGRAPH_MAP<const>: {string:string} = {
+   ["??="] = "#", ["??/"] = "\\", ["??'"] = "^", ["??("] = "[", ["??)"] = "]",
+   ["??!"] = "|", ["??<"] = "{", ["??>"] = "}", ["??-"] = "~",
+}
+
 local record CondFrame
    parent_active: boolean
    taken: boolean
@@ -227,6 +232,22 @@ local record PPState
    time_literal: string
 end
 
+local function macro_index(state: PPState, tok: lexer.Token): integer
+   local mgr = state.mgr
+   local ptr: ffi.Pointer<integer>
+   if tok.file_id == last_file_id and last_ptr then
+      ptr = last_ptr
+   else
+      ptr = mgr.ptrs[tok.file_id]
+      last_file_id = tok.file_id
+      last_ptr = ptr
+   end
+   if ptr then
+      return macro_table_get(state.macro_table, ptr + tok.start, tok.stop - tok.start)
+   end
+   return 0
+end
+
 local record TokenSource
    next: function(): lexer.Token
    peek: function(): lexer.Token
@@ -237,18 +258,7 @@ local record TokenSource
 end
 
 local TOKEN_SIZE<const> = ffi.sizeof("tl_token_fast")
-
-local function clone_token(tok: lexer.Token): lexer.Token
-   local new: lexer.Token = ffi.new("tl_token_fast")
-   new.start = tok.start
-   new.stop = tok.stop
-   new.line = tok.line
-   new.col = tok.col
-   new.file_id = tok.file_id
-   new.kind = tok.kind
-   new.flags = tok.flags
-   return new
-end
+local ffi_copy<const> = ffi.copy
 
 local function register_source(mgr: SourceManager, file_id: integer, src: string, path: string | nil)
    mgr.sources[file_id] = src
@@ -278,7 +288,7 @@ local function lex_single_token(mgr: SourceManager, text: string): lexer.Token
    register_source(mgr, fid, text, "<macro>")
    local lex = lexer.new_lexer(text, fid)
    local tok = lexer.next_token(lex)
-   return clone_token(tok)
+   return tok
 end
 
 local function paste_tokens(left: lexer.Token, right: lexer.Token, mgr: SourceManager): lexer.Token
@@ -291,7 +301,7 @@ local function define_object_macro(state: PPState, name: string, tokens: {lexer.
    local len = #tokens
    local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", len > 0 and len or 1)
    for i, t in ipairs(tokens) do
-      ffi.copy(arr + (i - 1), t, TOKEN_SIZE)
+      ffi_copy(arr + (i - 1), t, TOKEN_SIZE)
    end
    local macro: MacroC = {
       name = name,
@@ -360,22 +370,27 @@ local function resolve_include(path: string, is_angle: boolean, state: PPState, 
 end
 
 local function replace_trigraphs(src: string): string
-   local trigraphs: {string:string} = {
-      ["??="] = "#", ["??/"] = "\\", ["??'"] = "^", ["??("] = "[", ["??)"] = "]",
-      ["??!"] = "|", ["??<"] = "{", ["??>"] = "}", ["??-"] = "~",
-   }
+   if not src:find("??", 1, true) then
+      return src
+   end
    return (src:gsub("%?%?.", function(seq: string): string
-      return trigraphs[seq] or seq
+      return TRIGRAPH_MAP[seq] or seq
    end))
 end
 
 local function normalize_newlines(src: string): string
-   src = src:gsub("\r\n", "\n")
-   src = src:gsub("\r", "\n")
-   return src
+   if not src:find("\r", 1, true) then
+      return src
+   end
+   local s = src:gsub("\r\n", "\n")
+   local normalized = s:gsub("\r", "\n")
+   return normalized
 end
 
 local function splice_lines(src: string): string
+   if not src:find("\\\n", 1, true) then
+      return src
+   end
    return (src:gsub("\\\n", ""))
 end
 
@@ -432,26 +447,37 @@ local record TokenVector
    capacity: integer
 end
 
+local vec_pool: {TokenVector} = {}
+
 local function new_token_vector(capacity?: integer): TokenVector
-   capacity = capacity or 16
-   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", capacity)
-   return {
-      data = arr,
-      size = 0,
-      capacity = capacity
-   }
+   local cap = capacity or 16
+   if capacity is nil then
+      local pooled = vec_pool[#vec_pool]
+      if pooled and pooled.capacity >= cap then
+         vec_pool[#vec_pool] = nil
+         pooled.size = 0
+         return pooled
+      end
+   end
+   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", cap)
+   return { data = arr, size = 0, capacity = cap }
+end
+
+local function recycle_vector(vec: TokenVector)
+   vec.size = 0
+   vec_pool[#vec_pool + 1] = vec
 end
 
 local function vec_push(vec: TokenVector, tok: lexer.Token)
    if vec.size >= vec.capacity then
       local new_cap = vec.capacity * 2
       local new_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[?]", new_cap)
-      ffi.copy(new_arr, vec.data, vec.size * ffi.sizeof("tl_token_fast"))
+      ffi_copy(new_arr, vec.data, vec.size * ffi.sizeof("tl_token_fast"))
       vec.data = new_arr
       vec.capacity = new_cap
    end
    -- Copy token content
-   ffi.copy(vec.data + vec.size, tok, ffi.sizeof("tl_token_fast"))
+   ffi_copy(vec.data + vec.size, tok, ffi.sizeof("tl_token_fast"))
    vec.size = vec.size + 1
 end
 
@@ -561,7 +587,7 @@ local function parse_define(tokens: TokenVector, state: PPState)
    macro_table_put(state.macro_table, name, #state.macros, state.macro_refs)
 end
 
-local function parse_macro_args(source: TokenSource, mgr: SourceManager): {TokenVector}
+   local function parse_macro_args(source: TokenSource, mgr: SourceManager): {TokenVector}
    local args: {TokenVector} = {}
    local depth = 0
    local current = new_token_vector()
@@ -611,7 +637,7 @@ local function parse_macro_args(source: TokenSource, mgr: SourceManager): {Token
    return args
 end
 
-local function substitute_macro(macro: MacroC, args: {TokenVector}, state: PPState): TokenVector
+   local function substitute_macro(macro: MacroC, args: {TokenVector}, state: PPState): TokenVector
    local out = new_token_vector()
    local rep = macro.replacement
    local len = macro.replacement_len
@@ -704,6 +730,12 @@ local function substitute_macro(macro: MacroC, args: {TokenVector}, state: PPSta
    end
 
    return out
+end
+
+local function recycle_args(args: {TokenVector})
+   for i = 1, #args do
+      recycle_vector(args[i])
+   end
 end
 
 local function expand_builtin(macro: MacroC, tok: lexer.Token, state: PPState): TokenVector
@@ -932,10 +964,10 @@ local function expand_expr_tokens(tokens: TokenVector, state: PPState): TokenVec
       local ptr = current.data
       local idx = 0
       while idx < current.size do
-         local tok = ptr[idx]
-         local lx = get_lexeme(mgr, tok)
-         if tok.kind == lexer.K_IDENTIFIER and lx ~= "defined" then
-            local macro_idx = macro_table_get(state.macro_table, ffi.cast("const uint8_t*", lx), #lx)
+      local tok = ptr[idx]
+      local lx = get_lexeme(mgr, tok)
+      if tok.kind == lexer.K_IDENTIFIER and lx ~= "defined" then
+         local macro_idx = macro_index(state, tok)
             if macro_idx > 0 then
                local macro = state.macros[macro_idx]
                if not macro.is_function then
@@ -1025,6 +1057,7 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
          vec_push(def_tokens, ptr[i])
       end
       parse_define(def_tokens, state)
+      recycle_vector(def_tokens)
    elseif name == "undef" then
       if not active then return end
       if line_tokens.size > 1 then
@@ -1038,6 +1071,7 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
          vec_push(inc_tokens, ptr[i])
       end
       local path, is_angle = parse_include_target(inc_tokens, state.mgr)
+      recycle_vector(inc_tokens)
       if path then
          local cur_path = state.mgr.paths[dir_tok.file_id] or state.opts.current_dir or ""
          local resolved = resolve_include(path, is_angle, state, cur_path)
@@ -1074,6 +1108,8 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
          expr_list[#expr_list + 1] = eptr[i]
       end
       local cond_val = eval_expr(expr_list, state) ~= 0
+      recycle_vector(expanded)
+      recycle_vector(expr_tokens)
       local new_active = parent_active and cond_val
       table.insert(state.cond_stack, { parent_active = parent_active, taken = new_active, else_seen = false })
       state.active = new_active
@@ -1109,6 +1145,8 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
             expr_list[#expr_list + 1] = eptr[i]
          end
          cond = eval_expr(expr_list, state) ~= 0
+         recycle_vector(expanded)
+         recycle_vector(expr_tokens)
       end
       local new_active = frame.parent_active and (not frame.taken) and cond
       frame.taken = frame.taken or new_active
@@ -1149,6 +1187,7 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
          end
       end
    end
+   recycle_vector(line_tokens)
 end
 
 local function preprocess(src: string, file_id: integer, reporter: Reporter, opts?: PPOptions): TokenSource
@@ -1196,6 +1235,22 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
    ensure_source_info(mgr, file_id)
    local initial_source = new_lexer_source(src, file_id, mgr, options.source_path)
    local stack: {TokenSource} = { initial_source }
+   local emit_block_size<const> = 4096
+   local emit_blocks: {ffi.Array<lexer.Token>} = { ffi.new("tl_token_fast[?]", emit_block_size) }
+   local emit_idx = 0
+
+   local function emit(tok: lexer.Token): lexer.Token
+      local block = emit_blocks[#emit_blocks]
+      if emit_idx >= emit_block_size then
+         block = ffi.new("tl_token_fast[?]", emit_block_size)
+         emit_blocks[#emit_blocks + 1] = block
+         emit_idx = 0
+      end
+      ffi_copy(block + emit_idx, tok, TOKEN_SIZE)
+      local out = block[emit_idx]
+      emit_idx = emit_idx + 1
+      return out
+   end
    
    local function next_token(): lexer.Token
       while #stack > 0 do
@@ -1215,20 +1270,7 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
              top.next()
          elseif tok.kind == lexer.K_IDENTIFIER then
              top.next() -- Consume identifier
-             
-             local ptr: ffi.Pointer<integer>
-             if tok.file_id == last_file_id and last_ptr then
-                ptr = last_ptr
-             else
-                ptr = mgr.ptrs[tok.file_id]
-                last_file_id = tok.file_id
-                last_ptr = ptr
-             end
-             
-             local macro_idx = 0
-             if ptr then
-                 macro_idx = macro_table_get(state.macro_table, ptr + tok.start, tok.stop - tok.start)
-             end
+             local macro_idx = macro_index(state, tok)
              
              local macro: MacroC = nil
              if macro_idx > 0 then
@@ -1236,22 +1278,23 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
              end
 
              if macro then
-                if macro.is_function then
-                   local next_tok = top.peek()
-                   if next_tok.kind == lexer.K_PUNCT and get_lexeme(mgr, next_tok) == "(" then
-                      if state.expanding[macro.name] then
-                         return clone_token(tok)
-                      end
-                      state.expanding[macro.name] = true
-                      local args = parse_macro_args(top, mgr)
+               if macro.is_function then
+                  local next_tok = top.peek()
+                  if next_tok.kind == lexer.K_PUNCT and get_lexeme(mgr, next_tok) == "(" then
+                     if state.expanding[macro.name] then
+                         return tok
+                     end
+                     state.expanding[macro.name] = true
+                     local args = parse_macro_args(top, mgr)
                       local expanded = substitute_macro(macro, args, state)
-                      stack[#stack + 1] = new_vector_source(expanded, macro.name)
-                   else
-                      return clone_token(tok)
+                     recycle_args(args)
+                     stack[#stack + 1] = new_vector_source(expanded, macro.name)
+                  else
+                      return emit(tok)
                    end
                 else
                    if state.expanding[macro.name] then
-                      return clone_token(tok)
+                      return emit(tok)
                    end
                    state.expanding[macro.name] = true
                    local expanded: TokenVector
@@ -1263,11 +1306,11 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
                    stack[#stack + 1] = new_vector_source(expanded, macro.name)
                 end
              else
-                return clone_token(tok)
+                return emit(tok)
              end
         else
             top.next() -- Consume
-            return clone_token(tok)
+            return emit(tok)
         end
      end
       

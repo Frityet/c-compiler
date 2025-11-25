@@ -1,6 +1,6 @@
 
 package.path = "build/?.lua;build/?/init.lua;" .. package.path
-local PP = require("pp.pp_fast")
+local PP = require("pp.preprocessor")
 local LexerFast = require("lexer.lexer")
 
 local function read_file(path)
@@ -22,13 +22,18 @@ local niter = os.getenv("NITER")
 local iterations = niter and tonumber(niter) or 20
 
 local reporter = {
-   error = function(self, msg) end,
-   warn = function(self, msg) end
+   report = function() end,
 }
 
 
 local function bench_pp()
    local start = os.clock()
+   local profile_mode = os.getenv("PROFILE")
+   local p
+   if profile_mode then
+      p = require("jit.p")
+      p.start(profile_mode)
+   end
    for _ = 1, iterations do
       local pp = PP.preprocess(source, 1, reporter)
       local count = 0
@@ -37,6 +42,9 @@ local function bench_pp()
          if t.kind == LexerFast.K_EOF then break end
          count = count + 1
       end
+   end
+   if p then
+      p.stop()
    end
    return os.clock() - start
 end

@@ -1,4 +1,3 @@
-
 package.path = "build/?.lua;build/?/init.lua;" .. package.path
 local Lexer = require("lexer.lexer")
 
