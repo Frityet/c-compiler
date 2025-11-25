@@ -239,9 +239,15 @@ end
 local TOKEN_SIZE<const> = ffi.sizeof("tl_token_fast")
 
 local function clone_token(tok: lexer.Token): lexer.Token
-   local arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[1]")
-   ffi.copy(arr, tok, TOKEN_SIZE)
-   return arr[0]
+   local new: lexer.Token = ffi.new("tl_token_fast")
+   new.start = tok.start
+   new.stop = tok.stop
+   new.line = tok.line
+   new.col = tok.col
+   new.file_id = tok.file_id
+   new.kind = tok.kind
+   new.flags = tok.flags
+   return new
 end
 
 local function register_source(mgr: SourceManager, file_id: integer, src: string, path: string | nil)
@@ -380,23 +386,32 @@ local function new_lexer_source(src: string, file_id: integer, mgr: SourceManage
    register_source(mgr, file_id, src, path)
    
    local lex = lexer.new_lexer(src, file_id)
-   local buffer_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[1]")
+   -- local buffer_arr: ffi.Array<lexer.Token> = ffi.new("tl_token_fast[1]")
+   local buffer: lexer.Token = ffi.new("tl_token_fast")
    local has_buffer = false
    
    local function peek(): lexer.Token
       if has_buffer then
-         return buffer_arr[0]
+         return buffer
       end
       local t = lexer.next_token(lex)
-      ffi.copy(buffer_arr, t, ffi.sizeof("tl_token_fast"))
+
+      buffer.start = t.start
+      buffer.stop = t.stop
+      buffer.line = t.line
+      buffer.col = t.col
+      buffer.file_id = t.file_id
+      buffer.kind = t.kind
+      buffer.flags = t.flags
+
       has_buffer = true
-      return buffer_arr[0]
+      return buffer
    end
 
    local function next_token(): lexer.Token
       if has_buffer then
          has_buffer = false
-         return buffer_arr[0]
+         return buffer
       end
       return lexer.next_token(lex)
    end

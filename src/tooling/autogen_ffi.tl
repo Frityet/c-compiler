@@ -46,14 +46,6 @@ local record Rendered
    warnings: {string}
 end
 
-local function path_dir(p: string): string
-   local dir = p:match("^(.*)/[^/]+$")
-   if dir is nil or dir == "" then
-      return "."
-   end
-   return dir
-end
-
 local function basename_no_ext(p: string): string
    local base = p:match("([^/]+)$") or p
    return (base:gsub("%.[^%.]+$", ""))
