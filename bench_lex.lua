@@ -1,4 +1,4 @@
-package.path = "build/?.lua;build/?/init.lua;" .. package.path
+
 local Lexer = require("lexer.lexer")
 
 local function read_file(path)
@@ -36,9 +36,11 @@ end
 
 local profile = require("jit.p")
 
+local should_profile = os.getenv("PROFILE")
+
 local function bench_lex()
     local start = os.clock()
-    profile.start("l")
+    if should_profile then profile.start(should_profile) end
     for _ = 1, iterations do
         local state = Lexer.new_lexer(source, 1)
 
@@ -53,7 +55,7 @@ local function bench_lex()
         end
     end
     local t =  os.clock() - start
-    profile.stop()
+    if should_profile then profile.stop() end
     -- print(profile.report())
     return t
 end

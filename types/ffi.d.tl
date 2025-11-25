@@ -89,10 +89,10 @@ local record ffi
     errno: function(newerr?: integer): integer
     string: function(ptr: CData, len?: integer): string
 
-    copy: function<T is CData>(dest: Pointer<T>, src: Pointer<T>, size: integer)
-    copy: function<T is CData>(dest: Pointer<T>, src: Array<T>, size: integer)
-    copy: function<T is CData>(dest: Pointer<T>, src: string, size: integer)
-    copy: function<T is CData>(dest: Pointer<T>, src: T, size: integer)
+    copy: function<T is CData>(dest: T, src: Pointer<T>, size: integer)
+    copy: function<T is CData>(dest: T, src: Array<T>, size: integer)
+    copy: function<T is CData>(dest: T, src: string, size: integer)
+    copy: function<T is CData>(dest: T, src: T, size: integer)
 
     -- copy: function<T is CData>(dest: Array<T>, src: Pointer<T>, size: integer)
     -- copy: function<T is CData>(dest: Array<T>, src: Array<T>, size: integer)

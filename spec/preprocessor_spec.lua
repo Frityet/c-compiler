@@ -21,7 +21,7 @@ local function lexemes(pp, tokens)
    local out = {}
    for _, t in ipairs(tokens) do
       if t.kind == lexer.K_EOF then break end
-      out[#out + 1] = Preprocessor.get_lexeme(mgr, t)
+      out[#out + 1] = Preprocessor.lexeme_to_string(Preprocessor.get_lexeme(mgr, t))
    end
    return out
 end
@@ -43,7 +43,7 @@ local function render_text(pp, tokens)
       if prev and should_insert_space(prev, t) then
          out[#out + 1] = " "
       end
-      out[#out + 1] = Preprocessor.get_lexeme(mgr, t)
+      out[#out + 1] = Preprocessor.lexeme_to_string(Preprocessor.get_lexeme(mgr, t))
       prev = t
    end
 

@@ -9,15 +9,21 @@ description = {
    license = "GPLv3"
 }
 dependencies = {
-   "lua ~> 5.1"
+   "lua ~> 5.1",
+   "argparse"
 }
 build_dependencies = {
-   "cyan",
-   "tl",
-   "luarocks-build-cyan"
+   "luarocks-build-xmake"
 }
 build = {
-   type = "builtin",
+   type = "xmake",
+
+   install = {
+      lua = {
+         ["tl"] = "extern/tl/tl.lua",
+         ["reflect"] = "reflect.lua"
+      }
+   }
 }
 test_dependencies = {
    "busted"

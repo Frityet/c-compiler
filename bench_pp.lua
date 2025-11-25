@@ -25,13 +25,12 @@ local reporter = {
    report = function() end,
 }
 
+local profile_mode = os.getenv("PROFILE")
+local p = require("jit.p")
 
 local function bench_pp()
    local start = os.clock()
-   local profile_mode = os.getenv("PROFILE")
-   local p
    if profile_mode then
-      p = require("jit.p")
       p.start(profile_mode)
    end
    for _ = 1, iterations do
@@ -42,8 +41,12 @@ local function bench_pp()
          if t.kind == LexerFast.K_EOF then break end
          count = count + 1
       end
+      if #(reporter.diagnostics or {}) > 0 then
+         rep:print_all(10)
+         error("Parsing failed with "..#reporter.diagnostics.." diagnostics")
+      end
    end
-   if p then
+   if profile_mode then
       p.stop()
    end
    return os.clock() - start

@@ -121,19 +121,19 @@ local punct_list = {
 }
 for _, p in ipairs(punct_list) do add_punct(p) end
 
-local keywords: {string:boolean} = {
-   ["auto"] = true, ["break"] = true, ["case"] = true, ["char"] = true,
-   ["const"] = true, ["continue"] = true, ["default"] = true, ["do"] = true,
-   ["double"] = true, ["else"] = true, ["enum"] = true, ["extern"] = true,
-   ["float"] = true, ["for"] = true, ["goto"] = true, ["if"] = true,
-   ["int"] = true, ["long"] = true, ["register"] = true, ["return"] = true,
-   ["short"] = true, ["signed"] = true, ["sizeof"] = true, ["static"] = true,
-   ["struct"] = true, ["switch"] = true, ["typedef"] = true, ["union"] = true,
-   ["unsigned"] = true, ["void"] = true, ["volatile"] = true, ["while"] = true,
-   ["_Bool"] = true, ["_Complex"] = true, ["_Imaginary"] = true, ["inline"] = true,
-   ["restrict"] = true, ["_Alignas"] = true, ["_Alignof"] = true, ["_Atomic"] = true,
-   ["_Generic"] = true, ["_Noreturn"] = true, ["_Static_assert"] = true, ["_Thread_local"] = true,
-}
+-- local keywords: {string:boolean} = {
+--    ["auto"] = true, ["break"] = true, ["case"] = true, ["char"] = true,
+--    ["const"] = true, ["continue"] = true, ["default"] = true, ["do"] = true,
+--    ["double"] = true, ["else"] = true, ["enum"] = true, ["extern"] = true,
+--    ["float"] = true, ["for"] = true, ["goto"] = true, ["if"] = true,
+--    ["int"] = true, ["long"] = true, ["register"] = true, ["return"] = true,
+--    ["short"] = true, ["signed"] = true, ["sizeof"] = true, ["static"] = true,
+--    ["struct"] = true, ["switch"] = true, ["typedef"] = true, ["union"] = true,
+--    ["unsigned"] = true, ["void"] = true, ["volatile"] = true, ["while"] = true,
+--    ["_Bool"] = true, ["_Complex"] = true, ["_Imaginary"] = true, ["inline"] = true,
+--    ["restrict"] = true, ["_Alignas"] = true, ["_Alignof"] = true, ["_Atomic"] = true,
+--    ["_Generic"] = true, ["_Noreturn"] = true, ["_Static_assert"] = true, ["_Thread_local"] = true,
+-- }
 
 -- ffi.cdef [[
 -- bool is_keyword_c(const unsigned char *s, int len);
@@ -166,6 +166,7 @@ local macro char!(x: Expression): Expression
 
    local n = block("integer")
    n.constnum = string.byte(x.conststr, 1)
+   n.tk = tostring(n.constnum)
    return n
 end
 
@@ -440,8 +441,10 @@ local function next_token(state: LexerState): TokenC
             if pos >= len then break end
             c = ptr[pos]
          until band(cp[c], PROP_SPACE) == 0
+
          start_pos = pos
          start_col = col
+
          goto scan
       end
 
@@ -658,9 +661,7 @@ local function next_token(state: LexerState): TokenC
       tok.line = line
       tok.col = col
       tok.flags = 0
-      local eof_arr: ffi.Array<TokenC> = ffi.new("tl_token_fast[1]")
-      ffi.copy(eof_arr, tok, ffi.sizeof("tl_token_fast"))
-      return eof_arr[0]
+      return ffi.new("tl_token_fast", tok)
    end
 
    tok.kind = kind
@@ -669,9 +670,11 @@ local function next_token(state: LexerState): TokenC
    tok.line = line
    tok.col = start_col
    tok.flags = newline_flag
-   local out_arr: ffi.Array<TokenC> = ffi.new("tl_token_fast[1]")
-   ffi.copy(out_arr, tok, ffi.sizeof("tl_token_fast"))
-   return out_arr[0]
+
+   -- local out: TokenC = ffi.new("tl_token_fast")
+   -- ffi.copy(out, tok, ffi.sizeof("tl_token_fast"))
+   -- return out
+   return ffi.new("tl_token_fast", tok)
 end
 
 ffi.cdef [[
@@ -757,4 +760,5 @@ return {
    TOKEN_FLAG_NEWLINE = TOKEN_FLAG_NEWLINE,
    TOKEN_FLAG_LEADING_SPACE = TOKEN_FLAG_LEADING_SPACE,
    Token = TokenC,
+   StringView = StringView,
 }

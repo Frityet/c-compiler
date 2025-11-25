@@ -1,5 +1,6 @@
 local ffi = require("ffi")
 local lexer = require("lexer.lexer")
+local C = ffi.C
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
 local bit = require("bit")
@@ -43,10 +44,37 @@ local record PPOptions
    source_path: string | nil
 end
 
-local function get_lexeme(mgr: SourceManager, tok: lexer.Token): string
-   local ptr: ffi.CString = mgr.ptrs[tok.file_id]
-   if not ptr then return "" end
-   return ffi.string(ptr + tok.start, tok.stop - tok.start)
+local type BytePtr = ffi.CString
+local type StringView = lexer.StringView
+
+local EMPTY_STR_PTR<const>: BytePtr = ffi.cast("const char*", "")
+local EMPTY_VIEW<const>: StringView = ffi.new("struct tl_string_view", EMPTY_STR_PTR, 0)
+
+local function get_lexeme(mgr: SourceManager, tok: lexer.Token): StringView
+   local ptr: BytePtr | nil = mgr.ptrs[tok.file_id]
+   if ptr == nil then
+      return EMPTY_VIEW
+   end
+   return tok:lexeme(ptr)
+end
+
+local function lexeme_to_string(view: StringView): string
+   return ffi.string(view.ptr, view.len)
+end
+
+local function lexeme_eq(mgr: SourceManager, tok: lexer.Token, lit: string): boolean
+   local view = get_lexeme(mgr, tok)
+   if view.len ~= #lit then
+       return false
+   end
+   return (C.memcmp as function(ffi.CData, ffi.String, integer): integer)(view.ptr, lit, view.len) == 0
+end
+
+local function view_eq(view: StringView, lit: string): boolean
+   if view.len ~= #lit then
+      return false
+   end
+   return (C.memcmp as function(ffi.CData, ffi.String, integer): integer)(view.ptr, lit, view.len) == 0
 end
 
 local function path_dir(path: string): string
@@ -226,13 +254,13 @@ end
 
 local function macro_index(state: PPState, tok: lexer.Token): integer
    local mgr = state.mgr
-   local ptr: ffi.CString = mgr.ptrs[tok.file_id]
-   if not ptr then return 0 end
+   local ptr: BytePtr | nil = mgr.ptrs[tok.file_id]
+   if ptr is nil then return 0 end
    local base: ffi.Pointer<integer> = ffi.cast("const uint8_t*", ptr)
    local idx = macro_table_get(state.macro_table, base + tok.start, tok.stop - tok.start)
    if idx == 0 then
-      local name = get_lexeme(mgr, tok)
-      local map_idx = state.macro_map[name]
+      local name_view = get_lexeme(mgr, tok)
+      local map_idx = state.macro_map[lexeme_to_string(name_view)]
       if not map_idx is nil then
          return map_idx
       end
@@ -287,8 +315,8 @@ local function lex_single_token(mgr: SourceManager, text: string): lexer.Token
 end
 
 local function paste_tokens(left: lexer.Token, right: lexer.Token, mgr: SourceManager): lexer.Token
-   local l = get_lexeme(mgr, left)
-   local r = get_lexeme(mgr, right)
+   local l = lexeme_to_string(get_lexeme(mgr, left))
+   local r = lexeme_to_string(get_lexeme(mgr, right))
    return lex_single_token(mgr, l .. r)
 end
 
@@ -488,7 +516,7 @@ local function stringify_arg(arg_vec: TokenVector, mgr: SourceManager): lexer.To
    local parts: {string} = {}
    local ptr = arg_vec.data
    for i = 0, arg_vec.size - 1 do
-      parts[#parts + 1] = get_lexeme(mgr, ptr[i])
+      parts[#parts + 1] = lexeme_to_string(get_lexeme(mgr, ptr[i]))
    end
    local joined = table.concat(parts, " ")
    joined = joined:gsub("\\", "\\\\")
@@ -539,7 +567,7 @@ local function parse_define(tokens: TokenVector, state: PPState)
    local name_tok = ptr[0]
    if name_tok.kind ~= lexer.K_IDENTIFIER then return end
    
-   local name = get_lexeme(state.mgr, name_tok)
+   local name = lexeme_to_string(get_lexeme(state.mgr, name_tok))
    
    local is_function = false
    local params: {string} | nil = nil
@@ -549,7 +577,7 @@ local function parse_define(tokens: TokenVector, state: PPState)
    if tokens.size > 1 then
       local next_tok = ptr[1]
       -- Check adjacency: start of next must equal stop of name
-      if next_tok.kind == lexer.K_PUNCT and get_lexeme(state.mgr, next_tok) == "(" and
+      if next_tok.kind == lexer.K_PUNCT and lexeme_eq(state.mgr, next_tok, "(") and
          next_tok.start == name_tok.stop then
          is_function = true
          params = {}
@@ -558,17 +586,17 @@ local function parse_define(tokens: TokenVector, state: PPState)
          local i = 2
          while i < tokens.size do
             local t = ptr[i]
-            if t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == ")" then
+            if t.kind == lexer.K_PUNCT and lexeme_eq(state.mgr, t, ")") then
                replacement_start = i + 1
                break
-            elseif t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == "," then
+            elseif t.kind == lexer.K_PUNCT and lexeme_eq(state.mgr, t, ",") then
                i = i + 1
-            elseif t.kind == lexer.K_PUNCT and get_lexeme(state.mgr, t) == "..." then
+            elseif t.kind == lexer.K_PUNCT and lexeme_eq(state.mgr, t, "...") then
                is_variadic = true
                params[#params + 1] = "__VA_ARGS__"
                i = i + 1
             elseif t.kind == lexer.K_IDENTIFIER then
-               params[#params + 1] = get_lexeme(state.mgr, t)
+               params[#params + 1] = lexeme_to_string(get_lexeme(state.mgr, t))
                i = i + 1
             else
                i = i + 1
@@ -605,7 +633,7 @@ end
    local current = new_token_vector()
 
    local first = source.peek()
-   if first.kind == lexer.K_PUNCT and get_lexeme(mgr, first) == "(" then
+   if first.kind == lexer.K_PUNCT and lexeme_eq(mgr, first, "(") then
       source.next()
       depth = 1
    end
@@ -616,13 +644,12 @@ end
          break
       end
 
-      local lx = get_lexeme(mgr, t)
       if t.kind == lexer.K_PUNCT then
-         if lx == "(" then
+         if lexeme_eq(mgr, t, "(") then
             depth = depth + 1
             vec_push(current, t)
             source.next()
-         elseif lx == ")" then
+         elseif lexeme_eq(mgr, t, ")") then
             depth = depth - 1
             if depth == 0 then
                source.next()
@@ -632,7 +659,7 @@ end
                vec_push(current, t)
                source.next()
             end
-         elseif lx == "," and depth == 1 then
+         elseif depth == 1 and lexeme_eq(mgr, t, ",") then
             source.next()
             args[#args + 1] = current
             current = new_token_vector()
@@ -684,11 +711,10 @@ end
    local i = 0
    while i < len do
       local tok = rep[i]
-      local lx = get_lexeme(mgr, tok)
-      if lx == "#" and macro.is_function and i + 1 < len then
+      if macro.is_function and lexeme_eq(mgr, tok, "#") and i + 1 < len then
          local nxt = rep[i + 1]
          if nxt.kind == lexer.K_IDENTIFIER then
-            local name = get_lexeme(mgr, nxt)
+            local name = lexeme_to_string(get_lexeme(mgr, nxt))
             local arg_vec = arg_map[name]
             if arg_vec then
                vec_push(out, stringify_arg(arg_vec, mgr))
@@ -696,12 +722,13 @@ end
                goto continue
             end
          end
-      elseif lx == "##" then
+      elseif lexeme_eq(mgr, tok, "##") then
          local next_idx = i + 1
          if next_idx < len and out.size > 0 then
             local right_tok = rep[next_idx]
-            local right_lx = get_lexeme(mgr, right_tok)
-            local right_tokens = (right_tok.kind == lexer.K_IDENTIFIER) and arg_map[right_lx] or nil
+            local right_view = get_lexeme(mgr, right_tok)
+            local right_name = right_tok.kind == lexer.K_IDENTIFIER and lexeme_to_string(right_view) or nil
+            local right_tokens = (right_name ~= nil) and arg_map[right_name] or nil
             local right_token: lexer.Token
             local remaining: TokenVector | nil = nil
             if not right_tokens is nil then
@@ -724,7 +751,7 @@ end
       end
 
       if tok.kind == lexer.K_IDENTIFIER then
-         local name = lx
+         local name = lexeme_to_string(get_lexeme(mgr, tok))
          local arg_vec = arg_map[name]
          if arg_vec then
             local arg_ptr = arg_vec.data
@@ -829,9 +856,12 @@ local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
    local mgr = state.mgr
    local idx = 1
 
-   local function cur_lx(): string
+   local function cur_lx(): StringView
       local t = tokens[idx]
-      return t and get_lexeme(mgr, t) or ""
+      if t is nil then
+         return EMPTY_VIEW
+      end
+      return get_lexeme(mgr, t)
    end
 
    local function cur_token(): lexer.Token | nil
@@ -848,15 +878,15 @@ local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
       local t = cur_token()
       if t is nil then return 0 end
       local lx = cur_lx()
-      if lx == "defined" then
+      if view_eq(lx, "defined") then
          advance()
          local next_tok = cur_token()
          local name_tok: lexer.Token | nil = nil
-         if next_tok and get_lexeme(mgr, next_tok) == "(" then
+         if next_tok and lexeme_eq(mgr, next_tok, "(") then
             advance()
             name_tok = cur_token()
             advance()
-            if cur_token() and get_lexeme(mgr, cur_token() as lexer.Token) == ")" then
+            if cur_token() and lexeme_eq(mgr, cur_token() as lexer.Token, ")") then
                advance()
             end
          else
@@ -864,22 +894,22 @@ local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
             advance()
          end
          if name_tok then
-            return eval_defined(get_lexeme(mgr, name_tok), state)
+            return eval_defined(lexeme_to_string(get_lexeme(mgr, name_tok)), state)
          end
          return 0
       elseif t.kind == lexer.K_NUMBER then
          advance()
-         return parse_int_literal(lx)
+         return parse_int_literal(lexeme_to_string(lx))
       elseif t.kind == lexer.K_CHAR then
          advance()
-         return parse_char_literal(lx)
+         return parse_char_literal(lexeme_to_string(lx))
       elseif t.kind == lexer.K_IDENTIFIER then
          advance()
          return 0
-      elseif t.kind == lexer.K_PUNCT and lx == "(" then
+      elseif t.kind == lexer.K_PUNCT and view_eq(lx, "(") then
          advance()
          local v = parse_expression(0)
-         if cur_token() and get_lexeme(mgr, cur_token() as lexer.Token) == ")" then
+         if cur_token() and lexeme_eq(mgr, cur_token() as lexer.Token, ")") then
             advance()
          end
          return v
@@ -893,16 +923,16 @@ local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
       local t = cur_token()
       if t is nil then return 0 end
       local lx = cur_lx()
-      if lx == "!" then
+      if view_eq(lx, "!") then
          advance()
          return parse_unary() == 0 and 1 or 0
-      elseif lx == "~" then
+      elseif view_eq(lx, "~") then
          advance()
          return bit.bxor(parse_unary(), -1)
-      elseif lx == "+" then
+      elseif view_eq(lx, "+") then
          advance()
          return parse_unary()
-      elseif lx == "-" then
+      elseif view_eq(lx, "-") then
          advance()
          return -parse_unary()
       else
@@ -915,7 +945,8 @@ local function eval_expr(tokens: {lexer.Token}, state: PPState): integer
       while true do
          local t = cur_token()
          if t is nil then break end
-         local op = cur_lx()
+         local op_view = cur_lx()
+         local op = lexeme_to_string(op_view)
          local prec = binary_prec[op]
          if prec is nil or prec < min_prec then
             break
@@ -977,8 +1008,8 @@ local function expand_expr_tokens(tokens: TokenVector, state: PPState): TokenVec
       local idx = 0
       while idx < current.size do
       local tok = ptr[idx]
-      local lx = get_lexeme(mgr, tok)
-      if tok.kind == lexer.K_IDENTIFIER and lx ~= "defined" then
+      local tok_view = get_lexeme(mgr, tok)
+      if tok.kind == lexer.K_IDENTIFIER and not view_eq(tok_view, "defined") then
          local macro_idx = macro_index(state, tok)
             if macro_idx > 0 then
                local macro = state.macros[macro_idx]
@@ -1025,17 +1056,16 @@ local function parse_include_target(tokens: TokenVector, mgr: SourceManager): st
    local first = ptr[0]
    
    if first.kind == lexer.K_STRING then
-      local s = get_lexeme(mgr, first)
+      local s = lexeme_to_string(get_lexeme(mgr, first))
       return s:sub(2, -2), false -- strip quotes
-   elseif first.kind == lexer.K_PUNCT and get_lexeme(mgr, first) == "<" then
+   elseif first.kind == lexer.K_PUNCT and lexeme_eq(mgr, first, "<") then
       local pieces: {string} = {}
       for i = 1, tokens.size - 1 do
          local t = ptr[i]
-         local lx = get_lexeme(mgr, t)
-         if t.kind == lexer.K_PUNCT and lx == ">" then
+         if t.kind == lexer.K_PUNCT and lexeme_eq(mgr, t, ">") then
             break
          end
-         pieces[#pieces + 1] = lx
+         pieces[#pieces + 1] = lexeme_to_string(get_lexeme(mgr, t))
       end
       return table.concat(pieces), true
    end
@@ -1060,9 +1090,9 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       return
    end
 
-   local name = get_lexeme(state.mgr, dir_tok)
+   local name_view = get_lexeme(state.mgr, dir_tok)
    local active = state.active
-   if name == "define" then
+   if view_eq(name_view, "define") then
       if not active then return end
       local def_tokens = new_token_vector()
       for i = 1, line_tokens.size - 1 do
@@ -1070,13 +1100,13 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       end
       parse_define(def_tokens, state)
       recycle_vector(def_tokens)
-   elseif name == "undef" then
+   elseif view_eq(name_view, "undef") then
       if not active then return end
       if line_tokens.size > 1 then
-         local uname = get_lexeme(state.mgr, ptr[1])
+         local uname = lexeme_to_string(get_lexeme(state.mgr, ptr[1]))
          remove_macro(state, uname)
       end
-   elseif name == "include" then
+   elseif view_eq(name_view, "include") then
       if not active then return end
       local inc_tokens = new_token_vector()
       for i = 1, line_tokens.size - 1 do
@@ -1099,15 +1129,15 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
             end
          end
       end
-   elseif name == "pragma" then
+   elseif view_eq(name_view, "pragma") then
       if not active then return end
-      if line_tokens.size > 1 and get_lexeme(state.mgr, ptr[1]) == "once" then
+      if line_tokens.size > 1 and lexeme_eq(state.mgr, ptr[1], "once") then
          local info = ensure_source_info(state.mgr, dir_tok.file_id)
          if info.path ~= "" then
             state.once_paths[info.path] = true
          end
       end
-   elseif name == "if" then
+   elseif view_eq(name_view, "if") then
       local parent_active = state.active
       local expr_tokens = new_token_vector()
       for i = 1, line_tokens.size - 1 do
@@ -1125,20 +1155,20 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       local new_active = parent_active and cond_val
       table.insert(state.cond_stack, { parent_active = parent_active, taken = new_active, else_seen = false })
       state.active = new_active
-   elseif name == "ifdef" or name == "ifndef" then
+   elseif view_eq(name_view, "ifdef") or view_eq(name_view, "ifndef") then
       local parent_active = state.active
       local cond = false
       if line_tokens.size > 1 then
-         local lname = get_lexeme(state.mgr, ptr[1])
+         local lname = lexeme_to_string(get_lexeme(state.mgr, ptr[1]))
          cond = is_macro_defined(state, lname)
       end
-      if name == "ifndef" then
+      if view_eq(name_view, "ifndef") then
          cond = not cond
       end
       local new_active = parent_active and cond
       table.insert(state.cond_stack, { parent_active = parent_active, taken = new_active, else_seen = false })
       state.active = new_active
-   elseif name == "elif" then
+   elseif view_eq(name_view, "elif") then
       if #state.cond_stack == 0 then return end
       local frame = state.cond_stack[#state.cond_stack]
       if frame.else_seen then
@@ -1163,7 +1193,7 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       local new_active = frame.parent_active and (not frame.taken) and cond
       frame.taken = frame.taken or new_active
       state.active = new_active
-   elseif name == "else" then
+   elseif view_eq(name_view, "else") then
       if #state.cond_stack == 0 then return end
       local frame = state.cond_stack[#state.cond_stack]
       if frame.else_seen then
@@ -1173,26 +1203,26 @@ local function handle_directive(source: TokenSource, state: PPState, directive_l
       frame.taken = frame.taken or new_active
       frame.else_seen = true
       state.active = new_active
-   elseif name == "endif" then
+   elseif view_eq(name_view, "endif") then
       if #state.cond_stack == 0 then return end
       local frame = table.remove(state.cond_stack)
       state.active = frame.parent_active
-   elseif name == "error" then
+   elseif view_eq(name_view, "error") then
       if not active then return end
       local msg_parts: {string} = {}
       for i = 1, line_tokens.size - 1 do
-         msg_parts[#msg_parts + 1] = get_lexeme(state.mgr, ptr[i])
+         msg_parts[#msg_parts + 1] = lexeme_to_string(get_lexeme(state.mgr, ptr[i]))
       end
       local msg = table.concat(msg_parts, " ")
       state.reporter:report(Diagnostic.new("error", msg, dir_tok:span(), "PP300"))
-   elseif name == "line" then
+   elseif view_eq(name_view, "line") then
       if not active then return end
       if line_tokens.size > 1 then
-         local num = tonumber(get_lexeme(state.mgr, ptr[1])) or dir_tok.line
+         local num = tonumber(lexeme_to_string(get_lexeme(state.mgr, ptr[1]))) or dir_tok.line
          local info = ensure_source_info(state.mgr, dir_tok.file_id)
          info.line_delta = (num - (directive_line + 1)) as integer
          if line_tokens.size > 2 and ptr[2].kind == lexer.K_STRING then
-            local lx = get_lexeme(state.mgr, ptr[2])
+            local lx = lexeme_to_string(get_lexeme(state.mgr, ptr[2]))
             local stripped = lx:sub(2, -2)
             info.path = stripped
             state.mgr.paths[dir_tok.file_id] = stripped
@@ -1278,7 +1308,7 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
                state.expanding[top.macro_name] = nil
             end
             table.remove(stack)
-         elseif top.is_file and tok.kind == lexer.K_PUNCT and get_lexeme(mgr, tok) == "#" then
+         elseif top.is_file and tok.kind == lexer.K_PUNCT and lexeme_eq(mgr, tok, "#") then
              top.next() -- Consume '#'
              handle_directive(top, state, tok.line, stack)
       elseif not state.active then
@@ -1293,9 +1323,9 @@ local function preprocess(src: string, file_id: integer, reporter: Reporter, opt
              end
 
              if macro then
-               if macro.is_function then
+             if macro.is_function then
                   local next_tok = top.peek()
-                  if next_tok.kind == lexer.K_PUNCT and get_lexeme(mgr, next_tok) == "(" then
+                  if next_tok.kind == lexer.K_PUNCT and lexeme_eq(mgr, next_tok, "(") then
                      if state.expanding[macro.name] then
                          return tok
                      end
@@ -1356,6 +1386,7 @@ end
 return {
    new_lexer_source = new_lexer_source,
    get_lexeme = get_lexeme,
+   lexeme_to_string = lexeme_to_string,
    preprocess = preprocess,
    parse_define = parse_define,
    parse_macro_args = parse_macro_args,
