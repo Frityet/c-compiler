@@ -32,7 +32,7 @@ local function render_text(pp, tokens)
    local prev = nil
 
    local function should_insert_space(prev_tok, cur_tok)
-      if prev_tok.kind == lexer.K_PUNCT or cur_tok.kind == lexer.K_PUNCT then
+      if lexer.is_punct_kind(prev_tok.kind) or lexer.is_punct_kind(cur_tok.kind) then
          return prev_tok.kind == lexer.K_IDENTIFIER and cur_tok.kind == lexer.K_IDENTIFIER
       end
       return true

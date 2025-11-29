@@ -28,15 +28,15 @@ describe("lexer", function()
          table.insert(kinds, t.kind)
       end
       assert.are.same({
-         lexer.K_KEYWORD,
+         lexer.K_KEYWORD_INT,
          lexer.K_IDENTIFIER,
-         lexer.K_PUNCT,
-         lexer.K_PUNCT,
-         lexer.K_PUNCT,
-         lexer.K_KEYWORD,
+         lexer.K_PUNCT_LPAREN,
+         lexer.K_PUNCT_RPAREN,
+         lexer.K_PUNCT_LBRACE,
+         lexer.K_KEYWORD_RETURN,
          lexer.K_NUMBER,
-         lexer.K_PUNCT,
-         lexer.K_PUNCT,
+         lexer.K_PUNCT_SEMICOLON,
+         lexer.K_PUNCT_RBRACE,
          lexer.K_EOF,
       }, kinds)
    end)
