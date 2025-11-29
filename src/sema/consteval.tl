@@ -1,3 +1,7 @@
+local bit = require("bit")
+
+local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
+
 local function unary(op: string, val: integer | nil): integer | nil
    if val is nil then
       return nil
@@ -12,27 +16,6 @@ local function unary(op: string, val: integer | nil): integer | nil
       return -1 - val
    end
    return nil
-end
-
-local function lshift(lhs: integer, rhs: integer): integer
-   if rhs < 0 then
-      return lhs
-   end
-   return math.floor(lhs * (2 ^ rhs))
-end
-
-local function rshift(lhs: integer, rhs: integer): integer
-   if rhs < 0 then
-      return lhs
-   end
-   local denom = 2 ^ rhs
-   if denom == 0 then
-      return lhs
-   end
-   if lhs >= 0 then
-      return math.floor(lhs / denom)
-   end
-   return -math.floor((-lhs) / denom)
 end
 
 local function binary(op: string, lhs: integer | nil, rhs: integer | nil): integer | nil
@@ -56,11 +39,11 @@ local function binary(op: string, lhs: integer | nil, rhs: integer | nil): integ
    elseif op == ">>" then
       return rshift(lhs, rhs)
    elseif op == "&" then
-      return lhs & rhs
+      return band(lhs, rhs)
    elseif op == "|" then
-      return lhs | rhs
+      return bor(lhs, rhs)
    elseif op == "^" then
-      return lhs ~ rhs
+      return bxor(lhs, rhs)
    elseif op == "==" then
       return lhs == rhs and 1 or 0
    elseif op == "!=" then

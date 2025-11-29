@@ -13,11 +13,111 @@ local K_IDENTIFIER<const> = 1
 local K_NUMBER<const> = 2
 local K_STRING<const> = 3
 local K_CHAR<const> = 4
-local K_KEYWORD<const> = 5
-local K_PUNCT<const> = 6
-local K_EOF<const> = 7
-local K_COMMENT<const> = 8
-local K_WHITESPACE<const> = 9
+local K_KEYWORD_AUTO<const> = 5
+local K_KEYWORD_BREAK<const> = 6
+local K_KEYWORD_CASE<const> = 7
+local K_KEYWORD_CHAR<const> = 8
+local K_KEYWORD_CONST<const> = 9
+local K_KEYWORD_CONTINUE<const> = 10
+local K_KEYWORD_DEFAULT<const> = 11
+local K_KEYWORD_DO<const> = 12
+local K_KEYWORD_DOUBLE<const> = 13
+local K_KEYWORD_ELSE<const> = 14
+local K_KEYWORD_ENUM<const> = 15
+local K_KEYWORD_EXTERN<const> = 16
+local K_KEYWORD_FLOAT<const> = 17
+local K_KEYWORD_FOR<const> = 18
+local K_KEYWORD_GOTO<const> = 19
+local K_KEYWORD_IF<const> = 20
+local K_KEYWORD_INLINE<const> = 21
+local K_KEYWORD_INT<const> = 22
+local K_KEYWORD_LONG<const> = 23
+local K_KEYWORD_REGISTER<const> = 24
+local K_KEYWORD_RESTRICT<const> = 25
+local K_KEYWORD_RETURN<const> = 26
+local K_KEYWORD_SHORT<const> = 27
+local K_KEYWORD_SIGNED<const> = 28
+local K_KEYWORD_SIZEOF<const> = 29
+local K_KEYWORD_STATIC<const> = 30
+local K_KEYWORD_STRUCT<const> = 31
+local K_KEYWORD_SWITCH<const> = 32
+local K_KEYWORD_TYPEDEF<const> = 33
+local K_KEYWORD_UNION<const> = 34
+local K_KEYWORD_UNSIGNED<const> = 35
+local K_KEYWORD_VOID<const> = 36
+local K_KEYWORD_VOLATILE<const> = 37
+local K_KEYWORD_WHILE<const> = 38
+local K_KEYWORD__BOOL<const> = 39
+local K_KEYWORD__COMPLEX<const> = 40
+local K_KEYWORD__IMAGINARY<const> = 41
+local K_KEYWORD__ALIGNAS<const> = 42
+local K_KEYWORD__ALIGNOF<const> = 43
+local K_KEYWORD__ATOMIC<const> = 44
+local K_KEYWORD__GENERIC<const> = 45
+local K_KEYWORD__NORETURN<const> = 46
+local K_KEYWORD__STATIC_ASSERT<const> = 47
+local K_KEYWORD__THREAD_LOCAL<const> = 48
+local KEYWORD_MIN<const> = K_KEYWORD_AUTO
+local KEYWORD_MAX<const> = K_KEYWORD__THREAD_LOCAL
+
+local K_PUNCT_PLUS<const> = 49
+local K_PUNCT_MINUS<const> = 50
+local K_PUNCT_STAR<const> = 51
+local K_PUNCT_SLASH<const> = 52
+local K_PUNCT_PERCENT<const> = 53
+local K_PUNCT_CARET<const> = 54
+local K_PUNCT_AMP<const> = 55
+local K_PUNCT_BAR<const> = 56
+local K_PUNCT_TILDE<const> = 57
+local K_PUNCT_BANG<const> = 58
+local K_PUNCT_EQ<const> = 59
+local K_PUNCT_LT<const> = 60
+local K_PUNCT_GT<const> = 61
+local K_PUNCT_QUESTION<const> = 62
+local K_PUNCT_PLUS_PLUS<const> = 63
+local K_PUNCT_MINUS_MINUS<const> = 64
+local K_PUNCT_PLUS_EQ<const> = 65
+local K_PUNCT_MINUS_EQ<const> = 66
+local K_PUNCT_STAR_EQ<const> = 67
+local K_PUNCT_SLASH_EQ<const> = 68
+local K_PUNCT_PERCENT_EQ<const> = 69
+local K_PUNCT_CARET_EQ<const> = 70
+local K_PUNCT_AMP_EQ<const> = 71
+local K_PUNCT_BAR_EQ<const> = 72
+local K_PUNCT_LT_LT_EQ<const> = 73
+local K_PUNCT_GT_GT_EQ<const> = 74
+local K_PUNCT_EQ_EQ<const> = 75
+local K_PUNCT_BANG_EQ<const> = 76
+local K_PUNCT_LT_EQ<const> = 77
+local K_PUNCT_GT_EQ<const> = 78
+local K_PUNCT_AMP_AMP<const> = 79
+local K_PUNCT_BAR_BAR<const> = 80
+local K_PUNCT_LT_LT<const> = 81
+local K_PUNCT_GT_GT<const> = 82
+local K_PUNCT_ARROW<const> = 83
+local K_PUNCT_DOT<const> = 84
+local K_PUNCT_COMMA<const> = 85
+local K_PUNCT_SEMICOLON<const> = 86
+local K_PUNCT_COLON<const> = 87
+local K_PUNCT_LPAREN<const> = 88
+local K_PUNCT_RPAREN<const> = 89
+local K_PUNCT_LBRACKET<const> = 90
+local K_PUNCT_RBRACKET<const> = 91
+local K_PUNCT_LBRACE<const> = 92
+local K_PUNCT_RBRACE<const> = 93
+local K_PUNCT_ELLIPSIS<const> = 94
+local K_PUNCT_HASH_HASH<const> = 95
+local K_PUNCT_HASH<const> = 96
+local PUNCT_MIN<const> = K_PUNCT_PLUS
+local PUNCT_MAX<const> = K_PUNCT_HASH
+
+local K_EOF<const> = 97
+local K_COMMENT<const> = 98
+local K_WHITESPACE<const> = 99
+
+-- Sentinels for category matching (not emitted as token kinds)
+local K_KEYWORD<const> = -1
+local K_PUNCT<const> = -2
 
 -- Token Flags
 local TOKEN_FLAG_NEWLINE = 1
@@ -103,23 +203,118 @@ end
 init_char_props()
 
 local punct_max_len_c: Uint8Array = ffi.new("uint8_t[256]")
-local punctuators: {string:boolean} = {}
-local function add_punct(s: string)
-   punctuators[s] = true
-   local first = string.byte(s, 1)
-   if #s > punct_max_len_c[first] then
-      punct_max_len_c[first] = #s
+local type KeywordKindMap = {string: TokenKind}
+local type PunctKindMap = {string: TokenKind}
+
+local KEYWORDS<const>: KeywordKindMap = {
+   auto = K_KEYWORD_AUTO,
+   ["break"] = K_KEYWORD_BREAK,
+   ["case"] = K_KEYWORD_CASE,
+   ["char"] = K_KEYWORD_CHAR,
+   ["const"] = K_KEYWORD_CONST,
+   ["continue"] = K_KEYWORD_CONTINUE,
+   ["default"] = K_KEYWORD_DEFAULT,
+   ["do"] = K_KEYWORD_DO,
+   ["double"] = K_KEYWORD_DOUBLE,
+   ["else"] = K_KEYWORD_ELSE,
+   ["enum"] = K_KEYWORD_ENUM,
+   ["extern"] = K_KEYWORD_EXTERN,
+   ["float"] = K_KEYWORD_FLOAT,
+   ["for"] = K_KEYWORD_FOR,
+   ["goto"] = K_KEYWORD_GOTO,
+   ["if"] = K_KEYWORD_IF,
+   ["inline"] = K_KEYWORD_INLINE,
+   ["int"] = K_KEYWORD_INT,
+   ["long"] = K_KEYWORD_LONG,
+   ["register"] = K_KEYWORD_REGISTER,
+   ["restrict"] = K_KEYWORD_RESTRICT,
+   ["return"] = K_KEYWORD_RETURN,
+   ["short"] = K_KEYWORD_SHORT,
+   ["signed"] = K_KEYWORD_SIGNED,
+   ["sizeof"] = K_KEYWORD_SIZEOF,
+   ["static"] = K_KEYWORD_STATIC,
+   ["struct"] = K_KEYWORD_STRUCT,
+   ["switch"] = K_KEYWORD_SWITCH,
+   ["typedef"] = K_KEYWORD_TYPEDEF,
+   ["union"] = K_KEYWORD_UNION,
+   ["unsigned"] = K_KEYWORD_UNSIGNED,
+   ["void"] = K_KEYWORD_VOID,
+   ["volatile"] = K_KEYWORD_VOLATILE,
+   ["while"] = K_KEYWORD_WHILE,
+   ["_Bool"] = K_KEYWORD__BOOL,
+   ["_Complex"] = K_KEYWORD__COMPLEX,
+   ["_Imaginary"] = K_KEYWORD__IMAGINARY,
+   ["_Alignas"] = K_KEYWORD__ALIGNAS,
+   ["_Alignof"] = K_KEYWORD__ALIGNOF,
+   ["_Atomic"] = K_KEYWORD__ATOMIC,
+   ["_Generic"] = K_KEYWORD__GENERIC,
+   ["_Noreturn"] = K_KEYWORD__NORETURN,
+   ["_Static_assert"] = K_KEYWORD__STATIC_ASSERT,
+   ["_Thread_local"] = K_KEYWORD__THREAD_LOCAL,
+}
+
+local PUNCT<const>: PunctKindMap = {
+   ["+"] = K_PUNCT_PLUS,
+   ["-"] = K_PUNCT_MINUS,
+   ["*"] = K_PUNCT_STAR,
+   ["/"] = K_PUNCT_SLASH,
+   ["%"] = K_PUNCT_PERCENT,
+   ["^"] = K_PUNCT_CARET,
+   ["&"] = K_PUNCT_AMP,
+   ["|"] = K_PUNCT_BAR,
+   ["~"] = K_PUNCT_TILDE,
+   ["!"] = K_PUNCT_BANG,
+   ["="] = K_PUNCT_EQ,
+   ["<"] = K_PUNCT_LT,
+   [">"] = K_PUNCT_GT,
+   ["?"] = K_PUNCT_QUESTION,
+   ["++"] = K_PUNCT_PLUS_PLUS,
+   ["--"] = K_PUNCT_MINUS_MINUS,
+   ["+="] = K_PUNCT_PLUS_EQ,
+   ["-="] = K_PUNCT_MINUS_EQ,
+   ["*="] = K_PUNCT_STAR_EQ,
+   ["/="] = K_PUNCT_SLASH_EQ,
+   ["%="] = K_PUNCT_PERCENT_EQ,
+   ["^="] = K_PUNCT_CARET_EQ,
+   ["&="] = K_PUNCT_AMP_EQ,
+   ["|="] = K_PUNCT_BAR_EQ,
+   ["<<="] = K_PUNCT_LT_LT_EQ,
+   [">>="] = K_PUNCT_GT_GT_EQ,
+   ["=="] = K_PUNCT_EQ_EQ,
+   ["!="] = K_PUNCT_BANG_EQ,
+   ["<="] = K_PUNCT_LT_EQ,
+   [">="] = K_PUNCT_GT_EQ,
+   ["&&"] = K_PUNCT_AMP_AMP,
+   ["||"] = K_PUNCT_BAR_BAR,
+   ["<<"] = K_PUNCT_LT_LT,
+   [">>"] = K_PUNCT_GT_GT,
+   ["->"] = K_PUNCT_ARROW,
+   ["."] = K_PUNCT_DOT,
+   [","] = K_PUNCT_COMMA,
+   [";"] = K_PUNCT_SEMICOLON,
+   [":"] = K_PUNCT_COLON,
+   ["("] = K_PUNCT_LPAREN,
+   [")"] = K_PUNCT_RPAREN,
+   ["["] = K_PUNCT_LBRACKET,
+   ["]"] = K_PUNCT_RBRACKET,
+   ["{"] = K_PUNCT_LBRACE,
+   ["}"] = K_PUNCT_RBRACE,
+   ["..."] = K_PUNCT_ELLIPSIS,
+   ["##"] = K_PUNCT_HASH_HASH,
+   ["#"] = K_PUNCT_HASH,
+}
+
+local kind_to_lexeme: {TokenKind: string} = {}
+for lexeme, kind in pairs(KEYWORDS) do
+   kind_to_lexeme[kind] = lexeme
+end
+for lexeme, kind in pairs(PUNCT) do
+   kind_to_lexeme[kind] = lexeme
+   local first = string.byte(lexeme, 1)
+   if #lexeme > punct_max_len_c[first] then
+      punct_max_len_c[first] = #lexeme
    end
 end
-
-local punct_list = {
-   "+", "-", "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", "?",
-   "++", "--",
-   "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "<<=", ">>=",
-   "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "->", ".", ",", ";", ":",
-   "(", ")", "[", "]", "{", "}", "...", "##", "#"
-}
-for _, p in ipairs(punct_list) do add_punct(p) end
 
 -- local keywords: {string:boolean} = {
 --    ["auto"] = true, ["break"] = true, ["case"] = true, ["char"] = true,
@@ -198,194 +393,237 @@ local macro expand_cmp!(x: Expression): Expression
 end
 
 
-local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
-   if len < 2 or len > 15 then
-      return false
+local function is_keyword_kind(kind: TokenKind): boolean
+   return kind >= KEYWORD_MIN and kind <= KEYWORD_MAX
+end
+
+local function is_punct_kind(kind: TokenKind): boolean
+   return kind >= PUNCT_MIN and kind <= PUNCT_MAX
+end
+
+local function keyword_kind_from_lexeme(lexeme: string): TokenKind | nil
+   return KEYWORDS[lexeme]
+end
+
+local function punct_kind_from_lexeme(lexeme: string): TokenKind | nil
+   return PUNCT[lexeme]
+end
+
+local function kind_lexeme(kind: TokenKind): string | nil
+   return kind_to_lexeme[kind]
+end
+
+local function keyword_kind(s: Uint8Ptr, len: integer): TokenKind | nil
+   if len < 2 or len > 14 then
+      return nil
    end
 
    local c0 = s[0]
    if c0 == char! '_' then
       if len == 5 then
-         return expand_cmp!(s == '_Bool')
+         if expand_cmp!(s == '_Bool') then return K_KEYWORD__BOOL end
+      elseif len == 7 then
+         if is_kw!(s, "_Atomic") then return K_KEYWORD__ATOMIC end
       elseif len == 8 then
-         return is_kw!(s, "_Complex") or is_kw!(s, "_Atomic")
+         if is_kw!(s, "_Complex") then return K_KEYWORD__COMPLEX end
+         if is_kw!(s, "_Alignas") then return K_KEYWORD__ALIGNAS end
+         if is_kw!(s, "_Alignof") then return K_KEYWORD__ALIGNOF end
+         if is_kw!(s, "_Generic") then return K_KEYWORD__GENERIC end
+      elseif len == 9 then
+         if is_kw!(s, "_Noreturn") then return K_KEYWORD__NORETURN end
       elseif len == 10 then
-         return is_kw!(s, "_Alignas") or is_kw!(s, "_Alignof") or is_kw!(s, "_Noreturn")
-      elseif len == 14 then
-         return is_kw!(s, "_Static_assert")
+         if is_kw!(s, "_Imaginary") then return K_KEYWORD__IMAGINARY end
       elseif len == 13 then
-         return is_kw!(s, "_Thread_local")
-      else
-         return false
+         if is_kw!(s, "_Thread_local") then return K_KEYWORD__THREAD_LOCAL end
+      elseif len == 14 then
+         if is_kw!(s, "_Static_assert") then return K_KEYWORD__STATIC_ASSERT end
       end
+      return nil
    end
 
    if len == 2 then
-      return expand_cmp!(s == 'do') or expand_cmp!(s == "if")
+      if expand_cmp!(s == 'do') then return K_KEYWORD_DO end
+      if expand_cmp!(s == "if") then return K_KEYWORD_IF end
    elseif len == 3 then
-      return expand_cmp!(s == "for") or expand_cmp!(s == "int")
+      if expand_cmp!(s == "for") then return K_KEYWORD_FOR end
+      if expand_cmp!(s == "int") then return K_KEYWORD_INT end
    elseif len == 4 then
       if c0 == char!'a' then
-         return expand_cmp!(s == "auto")
+         if expand_cmp!(s == "auto") then return K_KEYWORD_AUTO end
       elseif c0 == char!'c' then
-         return expand_cmp!(s == "case") or expand_cmp!(s == "char")
+         if expand_cmp!(s == "case") then return K_KEYWORD_CASE end
+         if expand_cmp!(s == "char") then return K_KEYWORD_CHAR end
       elseif c0 == char!'e' then
-         return expand_cmp!(s == "else") or expand_cmp!(s == "enum")
+         if expand_cmp!(s == "else") then return K_KEYWORD_ELSE end
+         if expand_cmp!(s == "enum") then return K_KEYWORD_ENUM end
       elseif c0 == char!'g' then
-         return expand_cmp!(s == "goto")
+         if expand_cmp!(s == "goto") then return K_KEYWORD_GOTO end
       elseif c0 == char!'l' then
-         return expand_cmp!(s == "long")
+         if expand_cmp!(s == "long") then return K_KEYWORD_LONG end
       elseif c0 == char!'v' then
-         return expand_cmp!(s == "void")
-      else
-         return false
+         if expand_cmp!(s == "void") then return K_KEYWORD_VOID end
       end
    elseif len == 5 then
-      return expand_cmp!(s == "break") or expand_cmp!(s == "const") or
-             expand_cmp!(s == "float") or expand_cmp!(s == "short") or
-             expand_cmp!(s == "while")
-   --use regular `is_kw` for longer keywords
+      if expand_cmp!(s == "break") then return K_KEYWORD_BREAK end
+      if expand_cmp!(s == "const") then return K_KEYWORD_CONST end
+      if expand_cmp!(s == "float") then return K_KEYWORD_FLOAT end
+      if expand_cmp!(s == "short") then return K_KEYWORD_SHORT end
+      if expand_cmp!(s == "while") then return K_KEYWORD_WHILE end
+      if expand_cmp!(s == "union") then return K_KEYWORD_UNION end
    elseif len == 6 then
       if c0 == char!'d' then
-         return is_kw!(s, "double")
+         if is_kw!(s, "double") then return K_KEYWORD_DOUBLE end
       elseif c0 == char!'e' then
-         return is_kw!(s, "extern")
-      elseif c0 == char!'r' then
-         return is_kw!(s, "return")
-      elseif c0 == char!'s' then
-         return is_kw!(s, "sizeof") or is_kw!(s, "static") or is_kw!(s, "struct") or is_kw!(s, "switch")
+         if is_kw!(s, "extern") then return K_KEYWORD_EXTERN end
       elseif c0 == char!'i' then
-         return is_kw!(s, "inline")
-      else
-         return false
+         if is_kw!(s, "inline") then return K_KEYWORD_INLINE end
+      elseif c0 == char!'r' then
+         if is_kw!(s, "return") then return K_KEYWORD_RETURN end
+         if is_kw!(s, "signed") then return K_KEYWORD_SIGNED end
+      elseif c0 == char!'s' then
+         if is_kw!(s, "sizeof") then return K_KEYWORD_SIZEOF end
+         if is_kw!(s, "static") then return K_KEYWORD_STATIC end
+         if is_kw!(s, "struct") then return K_KEYWORD_STRUCT end
+         if is_kw!(s, "switch") then return K_KEYWORD_SWITCH end
       end
    elseif len == 7 then
-      if c0 == char!'t' then
-         return is_kw!(s, "typedef")
-      elseif c0 == char!'v' then
-         return is_kw!(s, "volatile")
-      else
-         return false
+      if c0 == char!'d' then
+         if is_kw!(s, "default") then return K_KEYWORD_DEFAULT end
+      elseif c0 == char!'t' then
+         if is_kw!(s, "typedef") then return K_KEYWORD_TYPEDEF end
       end
    elseif len == 8 then
       if c0 == char!'c' then
-         return is_kw!(s, "continue")
+         if is_kw!(s, "continue") then return K_KEYWORD_CONTINUE end
       elseif c0 == char!'r' then
-         return is_kw!(s, "register")
+         if is_kw!(s, "register") then return K_KEYWORD_REGISTER end
+         if is_kw!(s, "restrict") then return K_KEYWORD_RESTRICT end
       elseif c0 == char!'u' then
-         return is_kw!(s, "unsigned")
-      else
-         return false
+         if is_kw!(s, "unsigned") then return K_KEYWORD_UNSIGNED end
+      elseif c0 == char!'v' then
+         if is_kw!(s, "volatile") then return K_KEYWORD_VOLATILE end
       end
    end
+
+   return nil
 end
 
--- local function is_keyword_c(s: Uint8Ptr, len: integer): boolean
---    if len < 2 or len > 15 then
---       return false
---    end
+local function read_punct(ptr: Uint8Ptr, pos: integer, len: integer): (TokenKind, integer)
+   local remaining = len - pos
+   local c = ptr[pos]
+   if c == char!'+' then
+      if remaining > 1 then
+         local c2 = ptr[pos + 1]
+         if c2 == char!'+' then return K_PUNCT_PLUS_PLUS, 2 end
+         if c2 == char!'=' then return K_PUNCT_PLUS_EQ, 2 end
+      end
+      return K_PUNCT_PLUS, 1
+   elseif c == char!'-' then
+      if remaining > 1 then
+         local c2 = ptr[pos + 1]
+         if c2 == char!'-' then return K_PUNCT_MINUS_MINUS, 2 end
+         if c2 == char!'=' then return K_PUNCT_MINUS_EQ, 2 end
+         if c2 == char!'>' then return K_PUNCT_ARROW, 2 end
+      end
+      return K_PUNCT_MINUS, 1
+   elseif c == char!'*' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_STAR_EQ, 2
+      end
+      return K_PUNCT_STAR, 1
+   elseif c == char!'/' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_SLASH_EQ, 2
+      end
+      return K_PUNCT_SLASH, 1
+   elseif c == char!'%' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_PERCENT_EQ, 2
+      end
+      return K_PUNCT_PERCENT, 1
+   elseif c == char!'^' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_CARET_EQ, 2
+      end
+      return K_PUNCT_CARET, 1
+   elseif c == char!'&' then
+      if remaining > 1 then
+         local c2 = ptr[pos + 1]
+         if c2 == char!'&' then return K_PUNCT_AMP_AMP, 2 end
+         if c2 == char!'=' then return K_PUNCT_AMP_EQ, 2 end
+      end
+      return K_PUNCT_AMP, 1
+   elseif c == char!'|' then
+      if remaining > 1 then
+         local c2 = ptr[pos + 1]
+         if c2 == char!'|' then return K_PUNCT_BAR_BAR, 2 end
+         if c2 == char!'=' then return K_PUNCT_BAR_EQ, 2 end
+      end
+      return K_PUNCT_BAR, 1
+   elseif c == char!'~' then
+      return K_PUNCT_TILDE, 1
+   elseif c == char!'!' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_BANG_EQ, 2
+      end
+      return K_PUNCT_BANG, 1
+   elseif c == char!'=' then
+      if remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_EQ_EQ, 2
+      end
+      return K_PUNCT_EQ, 1
+   elseif c == char!'<' then
+      if remaining > 2 and ptr[pos + 1] == char!'<' and ptr[pos + 2] == char!'=' then
+         return K_PUNCT_LT_LT_EQ, 3
+      elseif remaining > 1 and ptr[pos + 1] == char!'<' then
+         return K_PUNCT_LT_LT, 2
+      elseif remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_LT_EQ, 2
+      end
+      return K_PUNCT_LT, 1
+   elseif c == char!'>' then
+      if remaining > 2 and ptr[pos + 1] == char!'>' and ptr[pos + 2] == char!'=' then
+         return K_PUNCT_GT_GT_EQ, 3
+      elseif remaining > 1 and ptr[pos + 1] == char!'>' then
+         return K_PUNCT_GT_GT, 2
+      elseif remaining > 1 and ptr[pos + 1] == char!'=' then
+         return K_PUNCT_GT_EQ, 2
+      end
+      return K_PUNCT_GT, 1
+   elseif c == char!'?' then
+      return K_PUNCT_QUESTION, 1
+   elseif c == char!'.' then
+      if remaining > 2 and ptr[pos + 1] == char!'.' and ptr[pos + 2] == char!'.' then
+         return K_PUNCT_ELLIPSIS, 3
+      end
+      return K_PUNCT_DOT, 1
+   elseif c == char!',' then
+      return K_PUNCT_COMMA, 1
+   elseif c == char!';' then
+      return K_PUNCT_SEMICOLON, 1
+   elseif c == char!':' then
+      return K_PUNCT_COLON, 1
+   elseif c == char!'(' then
+      return K_PUNCT_LPAREN, 1
+   elseif c == char!')' then
+      return K_PUNCT_RPAREN, 1
+   elseif c == char!'[' then
+      return K_PUNCT_LBRACKET, 1
+   elseif c == char!']' then
+      return K_PUNCT_RBRACKET, 1
+   elseif c == char!'{' then
+      return K_PUNCT_LBRACE, 1
+   elseif c == char!'}' then
+      return K_PUNCT_RBRACE, 1
+   elseif c == char!'#' then
+      if remaining > 1 and ptr[pos + 1] == char!'#' then
+         return K_PUNCT_HASH_HASH, 2
+      end
+      return K_PUNCT_HASH, 1
+   end
 
---    local c0 = s[0]
-
---    -- len == 2
---    if len == 2 then
---       local c1 = s[1]
---       return (c0 == 100 and c1 == 111) or      -- do
---              (c0 == 105 and c1 == 102)         -- if
-
---    -- len == 3
---    elseif len == 3 then
---       return (c0 == 102 and s[1] == 111 and s[2] == 114) or  -- for
---              (c0 == 105 and s[1] == 110 and s[2] == 116)     -- int
-
---    -- len == 4
---    elseif len == 4 then
---       local c1, c2, c3 = s[1], s[2], s[3]
---       -- auto / case / char / else / enum / goto / long / void
---       if c0 == 97 then         -- 'a'
---          return c1 == 117 and c2 == 116 and c3 == 111         -- auto
---       elseif c0 == 99 then     -- 'c'
---          return (c1 == 97 and c2 == 115 and c3 == 101) or     -- case
---                 (c1 == 104 and c2 == 97 and c3 == 114)        -- char
---       elseif c0 == 101 then    -- 'e'
---          return (c1 == 108 and c2 == 115 and c3 == 101) or    -- else
---                 (c1 == 110 and c2 == 117 and c3 == 109)       -- enum
---       elseif c0 == 103 then    -- 'g'
---          return c1 == 111 and c2 == 116 and c3 == 111         -- goto
---       elseif c0 == 108 then    -- 'l'
---          return c1 == 111 and c2 == 110 and c3 == 103         -- long
---       elseif c0 == 118 then    -- 'v'
---          return c1 == 111 and c2 == 105 and c3 == 100         -- void
---       else
---          return false
---       end
-
---    -- len == 5
---    elseif len == 5 then
---       local c1, c2, c3, c4 = s[1], s[2], s[3], s[4]
---       return (c0 == 98 and c1 == 114 and c2 == 101 and c3 == 97 and c4 == 107) or -- break
---              (c0 == 99 and c1 == 111 and c2 == 110 and c3 == 115 and c4 == 116) or -- const
---              (c0 == 102 and c1 == 108 and c2 == 111 and c3 == 97 and c4 == 116) or -- float
---              (c0 == 115 and c1 == 104 and c2 == 111 and c3 == 114 and c4 == 116) or -- short
---              (c0 == 119 and c1 == 104 and c2 == 105 and c3 == 108 and c4 == 101)    -- while
-
---    -- len == 6
---    elseif len == 6 then
---       -- double, extern, return, sizeof, static, struct, switch, inline
---       if c0 == 100 then
---          return is_kw!(s, "double", 6)
---       elseif c0 == 101 then
---          return is_kw!(s, "extern", 6)
---       elseif c0 == 114 then
---          return is_kw!(s, "return", 6)
---       elseif c0 == 115 then
---          return is_kw!(s, "sizeof", 6) or is_kw!(s, "static", 6) or is_kw!(s, "struct", 6) or is_kw!(s, "switch", 6)
---       elseif c0 == 105 then
---          return is_kw!(s, "inline", 6)
---       else
---          return false
---       end
-
---    -- len == 7
---    elseif len == 7 then
---       -- typedef, volatile
---       if c0 == 116 then
---          return is_kw!(s, "typedef", 7)
---       elseif c0 == 118 then
---          return is_kw!(s, "volatile", 7)
---       else
---          return false
---       end
-
---    -- len == 8
---    elseif len == 8 then
---       -- continue, register, unsigned, _Complex, _Atomic
---       if c0 == 99 then
---          return is_kw!(s, "continue", 8)
---       elseif c0 == 114 then
---          return is_kw!(s, "register", 8)
---       elseif c0 == 117 then
---          return is_kw!(s, "unsigned", 8)
---       elseif c0 == 95 then
---          return is_kw!(s, "_Complex", 8) or is_kw!(s, "_Atomic", 8)
---       else
---          return false
---    end
-
---    -- len == 9, 10, 11, 12, 13, etc.
---    elseif len == 5 and c0 == 95 then
---       return is_kw!(s, "_Bool", 5)
---    elseif len == 10 and c0 == 95 then
---       -- _Alignas, _Alignof, _Noreturn
---       return is_kw!(s, "_Alignas", 8) or is_kw!(s, "_Alignof", 8) or is_kw!(s, "_Noreturn", 9)
---    elseif len == 14 then
---       return is_kw!(s, "_Static_assert", 14)
---    elseif len == 13 then
---       return is_kw!(s, "_Thread_local", 13)
---    else
---       return false
---    end
--- end
+   return K_UNKNOWN, 1
+end
 
 
 local function new_lexer(source: string, file_id: integer): LexerState
@@ -415,7 +653,6 @@ local function next_token(state: LexerState): TokenC
    local newline_flag = state.newline_flag
    
    local cp = char_props_c
-   local pml = punct_max_len_c
    
    local start_pos = pos
    local start_col = col
@@ -482,10 +719,13 @@ local function next_token(state: LexerState): TokenC
             if pos >= len then break end
             c = ptr[pos]
          until band(cp[c], PROP_IDENT) == 0
-         
-         -- local s = ffi.string(ptr + start_pos, pos - start_pos)
-         -- kind = keywords[s] and K_KEYWORD or K_IDENTIFIER
-         kind = is_keyword_c(ptr + start_pos, pos - start_pos) and K_KEYWORD or K_IDENTIFIER
+
+         local kw = keyword_kind(ptr + start_pos, pos - start_pos)
+         if kw is nil then
+            kind = K_IDENTIFIER
+         else
+            kind = kw
+         end
       
       -- Number
       elseif band(cp[c], PROP_DIGIT) ~= 0 then
@@ -590,60 +830,17 @@ local function next_token(state: LexerState): TokenC
             newline_flag = 0 
             goto scan
          else
-            local max_l = pml[c]
-            local matched = false
-            if max_l > 1 then
-                if max_l >= 2 and pos + 1 < len then
-                   local c2 = ptr[pos+1]
-                   if c2 == 61 then
-                      matched = true; pos = pos + 2; col = col + 2
-                   end
-                end
-            end
-            
-            if not matched then
-               pos = pos + 1
-               col = col + 1
-            end
-            
-            kind = K_PUNCT
+            local pk, consumed = read_punct(ptr, pos, len)
+            pos = pos + consumed
+            col = col + consumed
+            kind = pk
          end
          
       else
-         local max_l = pml[c]
-         local matched = false
-         if max_l > 1 then
-             if max_l >= 3 and pos + 2 < len then
-                local c2 = ptr[pos+1]
-                local c3 = ptr[pos+2]
-                if c == 60 and c2 == 60 and c3 == 61 then matched = true; pos = pos + 3; col = col + 3 end
-                if c == 62 and c2 == 62 and c3 == 61 then matched = true; pos = pos + 3; col = col + 3 end
-                if c == 46 and c2 == 46 and c3 == 46 then matched = true; pos = pos + 3; col = col + 3 end
-             end
-             if not matched and max_l >= 2 and pos + 1 < len then
-                local c2 = ptr[pos+1]
-                if c2 == 61 then
-                   if c == 43 or c == 45 or c == 42 or c == 47 or c == 37 or c == 94 or c == 38 or c == 124 or c == 61 or c == 33 or c == 60 or c == 62 then
-                      matched = true; pos = pos + 2; col = col + 2
-                   end
-                elseif c == 45 and c2 == 62 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 43 and c2 == 43 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 45 and c2 == 45 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 38 and c2 == 38 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 124 and c2 == 124 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 60 and c2 == 60 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 62 and c2 == 62 then matched = true; pos = pos + 2; col = col + 2
-                elseif c == 35 and c2 == 35 then matched = true; pos = pos + 2; col = col + 2
-                end
-             end
-         end
-         
-         if not matched then
-            pos = pos + 1
-            col = col + 1
-         end
-         
-         kind = K_PUNCT
+         local pk, consumed = read_punct(ptr, pos, len)
+         pos = pos + consumed
+         col = col + consumed
+         kind = pk
       end
    end
    
@@ -683,7 +880,6 @@ struct tl_string_view {
    uint32_t len;
 };
 ]]
-local TLStringView = ffi.typeof("struct tl_string_view") as function(ptr: Uint8Ptr, len: integer)
 
 local record StringView is ffi.CData where ffi.istype("struct tl_string_view", self)
    ptr: Uint8Ptr
@@ -752,11 +948,110 @@ return {
    K_NUMBER = K_NUMBER,
    K_STRING = K_STRING,
    K_CHAR = K_CHAR,
+   K_KEYWORD_AUTO = K_KEYWORD_AUTO,
+   K_KEYWORD_BREAK = K_KEYWORD_BREAK,
+   K_KEYWORD_CASE = K_KEYWORD_CASE,
+   K_KEYWORD_CHAR = K_KEYWORD_CHAR,
+   K_KEYWORD_CONST = K_KEYWORD_CONST,
+   K_KEYWORD_CONTINUE = K_KEYWORD_CONTINUE,
+   K_KEYWORD_DEFAULT = K_KEYWORD_DEFAULT,
+   K_KEYWORD_DO = K_KEYWORD_DO,
+   K_KEYWORD_DOUBLE = K_KEYWORD_DOUBLE,
+   K_KEYWORD_ELSE = K_KEYWORD_ELSE,
+   K_KEYWORD_ENUM = K_KEYWORD_ENUM,
+   K_KEYWORD_EXTERN = K_KEYWORD_EXTERN,
+   K_KEYWORD_FLOAT = K_KEYWORD_FLOAT,
+   K_KEYWORD_FOR = K_KEYWORD_FOR,
+   K_KEYWORD_GOTO = K_KEYWORD_GOTO,
+   K_KEYWORD_IF = K_KEYWORD_IF,
+   K_KEYWORD_INLINE = K_KEYWORD_INLINE,
+   K_KEYWORD_INT = K_KEYWORD_INT,
+   K_KEYWORD_LONG = K_KEYWORD_LONG,
+   K_KEYWORD_REGISTER = K_KEYWORD_REGISTER,
+   K_KEYWORD_RESTRICT = K_KEYWORD_RESTRICT,
+   K_KEYWORD_RETURN = K_KEYWORD_RETURN,
+   K_KEYWORD_SHORT = K_KEYWORD_SHORT,
+   K_KEYWORD_SIGNED = K_KEYWORD_SIGNED,
+   K_KEYWORD_SIZEOF = K_KEYWORD_SIZEOF,
+   K_KEYWORD_STATIC = K_KEYWORD_STATIC,
+   K_KEYWORD_STRUCT = K_KEYWORD_STRUCT,
+   K_KEYWORD_SWITCH = K_KEYWORD_SWITCH,
+   K_KEYWORD_TYPEDEF = K_KEYWORD_TYPEDEF,
+   K_KEYWORD_UNION = K_KEYWORD_UNION,
+   K_KEYWORD_UNSIGNED = K_KEYWORD_UNSIGNED,
+   K_KEYWORD_VOID = K_KEYWORD_VOID,
+   K_KEYWORD_VOLATILE = K_KEYWORD_VOLATILE,
+   K_KEYWORD_WHILE = K_KEYWORD_WHILE,
+   K_KEYWORD__BOOL = K_KEYWORD__BOOL,
+   K_KEYWORD__COMPLEX = K_KEYWORD__COMPLEX,
+   K_KEYWORD__IMAGINARY = K_KEYWORD__IMAGINARY,
+   K_KEYWORD__ALIGNAS = K_KEYWORD__ALIGNAS,
+   K_KEYWORD__ALIGNOF = K_KEYWORD__ALIGNOF,
+   K_KEYWORD__ATOMIC = K_KEYWORD__ATOMIC,
+   K_KEYWORD__GENERIC = K_KEYWORD__GENERIC,
+   K_KEYWORD__NORETURN = K_KEYWORD__NORETURN,
+   K_KEYWORD__STATIC_ASSERT = K_KEYWORD__STATIC_ASSERT,
+   K_KEYWORD__THREAD_LOCAL = K_KEYWORD__THREAD_LOCAL,
    K_KEYWORD = K_KEYWORD,
+   K_PUNCT_PLUS = K_PUNCT_PLUS,
+   K_PUNCT_MINUS = K_PUNCT_MINUS,
+   K_PUNCT_STAR = K_PUNCT_STAR,
+   K_PUNCT_SLASH = K_PUNCT_SLASH,
+   K_PUNCT_PERCENT = K_PUNCT_PERCENT,
+   K_PUNCT_CARET = K_PUNCT_CARET,
+   K_PUNCT_AMP = K_PUNCT_AMP,
+   K_PUNCT_BAR = K_PUNCT_BAR,
+   K_PUNCT_TILDE = K_PUNCT_TILDE,
+   K_PUNCT_BANG = K_PUNCT_BANG,
+   K_PUNCT_EQ = K_PUNCT_EQ,
+   K_PUNCT_LT = K_PUNCT_LT,
+   K_PUNCT_GT = K_PUNCT_GT,
+   K_PUNCT_QUESTION = K_PUNCT_QUESTION,
+   K_PUNCT_PLUS_PLUS = K_PUNCT_PLUS_PLUS,
+   K_PUNCT_MINUS_MINUS = K_PUNCT_MINUS_MINUS,
+   K_PUNCT_PLUS_EQ = K_PUNCT_PLUS_EQ,
+   K_PUNCT_MINUS_EQ = K_PUNCT_MINUS_EQ,
+   K_PUNCT_STAR_EQ = K_PUNCT_STAR_EQ,
+   K_PUNCT_SLASH_EQ = K_PUNCT_SLASH_EQ,
+   K_PUNCT_PERCENT_EQ = K_PUNCT_PERCENT_EQ,
+   K_PUNCT_CARET_EQ = K_PUNCT_CARET_EQ,
+   K_PUNCT_AMP_EQ = K_PUNCT_AMP_EQ,
+   K_PUNCT_BAR_EQ = K_PUNCT_BAR_EQ,
+   K_PUNCT_LT_LT_EQ = K_PUNCT_LT_LT_EQ,
+   K_PUNCT_GT_GT_EQ = K_PUNCT_GT_GT_EQ,
+   K_PUNCT_EQ_EQ = K_PUNCT_EQ_EQ,
+   K_PUNCT_BANG_EQ = K_PUNCT_BANG_EQ,
+   K_PUNCT_LT_EQ = K_PUNCT_LT_EQ,
+   K_PUNCT_GT_EQ = K_PUNCT_GT_EQ,
+   K_PUNCT_AMP_AMP = K_PUNCT_AMP_AMP,
+   K_PUNCT_BAR_BAR = K_PUNCT_BAR_BAR,
+   K_PUNCT_LT_LT = K_PUNCT_LT_LT,
+   K_PUNCT_GT_GT = K_PUNCT_GT_GT,
+   K_PUNCT_ARROW = K_PUNCT_ARROW,
+   K_PUNCT_DOT = K_PUNCT_DOT,
+   K_PUNCT_COMMA = K_PUNCT_COMMA,
+   K_PUNCT_SEMICOLON = K_PUNCT_SEMICOLON,
+   K_PUNCT_COLON = K_PUNCT_COLON,
+   K_PUNCT_LPAREN = K_PUNCT_LPAREN,
+   K_PUNCT_RPAREN = K_PUNCT_RPAREN,
+   K_PUNCT_LBRACKET = K_PUNCT_LBRACKET,
+   K_PUNCT_RBRACKET = K_PUNCT_RBRACKET,
+   K_PUNCT_LBRACE = K_PUNCT_LBRACE,
+   K_PUNCT_RBRACE = K_PUNCT_RBRACE,
+   K_PUNCT_ELLIPSIS = K_PUNCT_ELLIPSIS,
+   K_PUNCT_HASH_HASH = K_PUNCT_HASH_HASH,
+   K_PUNCT_HASH = K_PUNCT_HASH,
    K_PUNCT = K_PUNCT,
    K_EOF = K_EOF,
    K_COMMENT = K_COMMENT,
    K_WHITESPACE = K_WHITESPACE,
+   KEYWORDS = KEYWORDS,
+   PUNCT = PUNCT,
+   is_keyword_kind = is_keyword_kind,
+   is_punct_kind = is_punct_kind,
+   keyword_kind_from_lexeme = keyword_kind_from_lexeme,
+   punct_kind_from_lexeme = punct_kind_from_lexeme,
+   kind_lexeme = kind_lexeme,
    TOKEN_FLAG_NEWLINE = TOKEN_FLAG_NEWLINE,
    TOKEN_FLAG_LEADING_SPACE = TOKEN_FLAG_LEADING_SPACE,
    Token = TokenC,

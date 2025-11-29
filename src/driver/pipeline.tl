@@ -8,16 +8,11 @@ local lexer = require("lexer.lexer")
 local ast = require("parser.ast")
 
 local type Token = lexer.Token
-local K_PUNCT = lexer.K_PUNCT
 local K_IDENTIFIER = lexer.K_IDENTIFIER
 local K_EOF = lexer.K_EOF
 local type TranslationUnit = ast.TranslationUnit
 local type CheckedTranslationUnit = Checker.CheckedTranslationUnit
-
-local function path_dir(path: string): string
-   local dir = path:match("^(.*)/[^/]+$") or "."
-   return dir
-end
+local is_punct_kind = lexer.is_punct_kind
 
 local record PipelineOptions
    dump_tokens: boolean
@@ -43,18 +38,8 @@ local function read_file(path: string): string | nil, string | nil
    return data, nil
 end
 
-local function dump_tokens(state: lexer.LexerState, next_token: function(): Token)
-   while true do
-      local t = next_token()
-      if not t or t.kind == K_EOF then
-         break
-      end
-      io.stdout:write(string.format("%d\t%s\n", t.kind, lexer.lexeme(t, state.src_ptr)))
-   end
-end
-
 local function should_insert_space(prev: Token, cur: Token): boolean
-   if prev.kind == K_PUNCT or cur.kind == K_PUNCT then
+   if is_punct_kind(prev.kind) or is_punct_kind(cur.kind) then
       return prev.kind == K_IDENTIFIER and cur.kind == K_IDENTIFIER
    end
    return true
@@ -118,7 +103,6 @@ local function compile_file(path: string, file_id: integer, opts?: PipelineOptio
    end
    rep:track_file(file_id, path, src)
 
-   local dir = path_dir(path)
    local pp = Preprocessor.preprocess(src, file_id, rep --[[, {
       search_paths = { dir },
       defines = {},
