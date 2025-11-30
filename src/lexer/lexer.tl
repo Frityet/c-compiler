@@ -668,7 +668,7 @@ local function next_token(state: LexerState): TokenC
       if band(cp[c], PROP_SPACE) ~= 0 then
          newline_flag = 0
          repeat
-            if c == 10 then -- \n
+            if c == char!'\n' then -- \n
                line = line + 1
                col = 1
                newline_flag = TOKEN_FLAG_NEWLINE
@@ -687,14 +687,14 @@ local function next_token(state: LexerState): TokenC
       end
 
       -- String / Char (handles wide prefixes)
-      if c == 34 or c == 39 or (c == 76 and pos + 1 < len and (ptr[pos+1] == 34 or ptr[pos+1] == 39)) then
+      if c == char!'"' or c == char!'\'' or (c == char!'L' and pos + 1 < len and (ptr[pos+1] == char!'"' or ptr[pos+1] == char!'\'')) then
          local quote = c
          kind = K_STRING
-         if c == 76 then -- L"..."
+         if c == char!'L' then -- L"..."
             pos = pos + 1; col = col + 1
             quote = ptr[pos]
          end
-         if quote == 39 then kind = K_CHAR end
+         if quote == char!'\'' then kind = K_CHAR end
          
          pos = pos + 1; col = col + 1 -- skip quote
          
@@ -713,7 +713,7 @@ local function next_token(state: LexerState): TokenC
          end
 
       -- Identifier / Keyword
-      elseif band(cp[c], PROP_ALPHA) ~= 0 or c == 95 then -- _
+      elseif band(cp[c], PROP_ALPHA) ~= 0 or c == char!'_' then -- _
          repeat
             pos = pos + 1
             col = col + 1
@@ -733,7 +733,7 @@ local function next_token(state: LexerState): TokenC
       elseif band(cp[c], PROP_DIGIT) ~= 0 then
          -- hex prefix 0x / 0X
          -- local test = char!'0'
-         if c == 48 and pos + 1 < len and (ptr[pos+1] == 120 or ptr[pos+1] == 88) then -- '0x' / '0X'
+         if c == char!'0' and pos + 1 < len and (ptr[pos+1] == char!'x' or ptr[pos+1] == char!'X') then -- '0x' / '0X'
             pos = pos + 2
             col = col + 2
             while pos < len do
@@ -759,7 +759,7 @@ local function next_token(state: LexerState): TokenC
          end
       
          -- fractional part
-         if pos < len and ptr[pos] == 46 then -- '.'
+         if pos < len and ptr[pos] == char!'.' then -- '.'
             pos = pos + 1; col = col + 1
             while pos < len do
                c = ptr[pos]
@@ -775,9 +775,9 @@ local function next_token(state: LexerState): TokenC
          -- exponent part
          if pos < len then
             c = ptr[pos]
-            if c == 101 or c == 69 or c == 112 or c == 80 then -- e E p P
+            if c == char!'e' or c == char!'E' or c == char!'p' or c == char!'P' then -- e E p P
                pos = pos + 1; col = col + 1
-               if pos < len and (ptr[pos] == 43 or ptr[pos] == 45) then -- + -
+               if pos < len and (ptr[pos] == char!'+' or ptr[pos] == char!'-') then -- + -
                   pos = pos + 1; col = col + 1
                end
                while pos < len do
@@ -795,7 +795,7 @@ local function next_token(state: LexerState): TokenC
          -- suffixes uUlLfF
          while pos < len do
             c = ptr[pos]
-            if c == 117 or c == 85 or c == 108 or c == 76 or c == 102 or c == 70 then
+            if c == char!'u' or c == char!'U' or c == char!'l' or c == char!'L' or c == char!'f' or c == char!'F' then
                pos = pos + 1; col = col + 1
             else
                break
@@ -803,9 +803,9 @@ local function next_token(state: LexerState): TokenC
          end
          kind = K_NUMBER
       -- Comments / Punctuation
-      elseif c == 47 then -- /
+      elseif c == char!'/' then -- /
          local next_c = (pos + 1 < len) and ptr[pos+1] or 0
-         if next_c == 47 then -- //
+         if next_c == char!'/' then -- //
             pos = pos + 2; col = col + 2
             while pos < len do
                c = ptr[pos]
@@ -814,11 +814,11 @@ local function next_token(state: LexerState): TokenC
             end
             newline_flag = 0 
             goto scan
-         elseif next_c == 42 then -- /*
+         elseif next_c == char!'*' then -- /*
             pos = pos + 2; col = col + 2
             while pos < len do
                c = ptr[pos]
-               if c == 42 and pos + 1 < len and ptr[pos+1] == 47 then
+               if c == char!'*' and pos + 1 < len and ptr[pos+1] == char!'/' then
                   pos = pos + 2; col = col + 2
                   break
                end
