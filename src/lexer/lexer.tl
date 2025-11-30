@@ -1,6 +1,7 @@
 local ffi = require("ffi")
 local bit = require("bit")
 local Span = require("util.span")
+local TLStringView = require("util.string_view")
 local band = bit.band
 local bor = bit.bor
 
@@ -472,36 +473,36 @@ local function keyword_kind(s: Uint8Ptr, len: integer): TokenKind | nil
       if expand_cmp!(s == "union") then return K_KEYWORD_UNION end
    elseif len == 6 then
       if c0 == char!'d' then
-         if is_kw!(s, "double") then return K_KEYWORD_DOUBLE end
+         if expand_cmp!(s == "double") then return K_KEYWORD_DOUBLE end
       elseif c0 == char!'e' then
-         if is_kw!(s, "extern") then return K_KEYWORD_EXTERN end
+         if expand_cmp!(s == "extern") then return K_KEYWORD_EXTERN end
       elseif c0 == char!'i' then
-         if is_kw!(s, "inline") then return K_KEYWORD_INLINE end
+         if expand_cmp!(s == "inline") then return K_KEYWORD_INLINE end
       elseif c0 == char!'r' then
-         if is_kw!(s, "return") then return K_KEYWORD_RETURN end
-         if is_kw!(s, "signed") then return K_KEYWORD_SIGNED end
+         if expand_cmp!(s == "return") then return K_KEYWORD_RETURN end
+         if expand_cmp!(s == "signed") then return K_KEYWORD_SIGNED end
       elseif c0 == char!'s' then
-         if is_kw!(s, "sizeof") then return K_KEYWORD_SIZEOF end
-         if is_kw!(s, "static") then return K_KEYWORD_STATIC end
-         if is_kw!(s, "struct") then return K_KEYWORD_STRUCT end
-         if is_kw!(s, "switch") then return K_KEYWORD_SWITCH end
+         if expand_cmp!(s == "sizeof") then return K_KEYWORD_SIZEOF end
+         if expand_cmp!(s == "static") then return K_KEYWORD_STATIC end
+         if expand_cmp!(s == "struct") then return K_KEYWORD_STRUCT end
+         if expand_cmp!(s == "switch") then return K_KEYWORD_SWITCH end
       end
    elseif len == 7 then
       if c0 == char!'d' then
-         if is_kw!(s, "default") then return K_KEYWORD_DEFAULT end
+         if expand_cmp!(s == "default") then return K_KEYWORD_DEFAULT end
       elseif c0 == char!'t' then
-         if is_kw!(s, "typedef") then return K_KEYWORD_TYPEDEF end
+         if expand_cmp!(s == "typedef") then return K_KEYWORD_TYPEDEF end
       end
    elseif len == 8 then
       if c0 == char!'c' then
-         if is_kw!(s, "continue") then return K_KEYWORD_CONTINUE end
+         if expand_cmp!(s == "continue") then return K_KEYWORD_CONTINUE end
       elseif c0 == char!'r' then
-         if is_kw!(s, "register") then return K_KEYWORD_REGISTER end
-         if is_kw!(s, "restrict") then return K_KEYWORD_RESTRICT end
+         if expand_cmp!(s == "register") then return K_KEYWORD_REGISTER end
+         if expand_cmp!(s == "restrict") then return K_KEYWORD_RESTRICT end
       elseif c0 == char!'u' then
-         if is_kw!(s, "unsigned") then return K_KEYWORD_UNSIGNED end
+         if expand_cmp!(s == "unsigned") then return K_KEYWORD_UNSIGNED end
       elseif c0 == char!'v' then
-         if is_kw!(s, "volatile") then return K_KEYWORD_VOLATILE end
+         if expand_cmp!(s == "volatile") then return K_KEYWORD_VOLATILE end
       end
    end
 
@@ -628,7 +629,7 @@ end
 
 local function new_lexer(source: string, file_id: integer): LexerState
    local len = #source
-   local buf: ffi.CData = ffi.new("uint8_t[?]", len + 1, source)
+   local buf: ffi.CData = ffi.cast("const char *", source)
 
    local state: LexerState = ffi.new("struct tl_lexer_state", {
       src_ptr = ffi.cast("const uint8_t*", buf),
@@ -640,7 +641,7 @@ local function new_lexer(source: string, file_id: integer): LexerState
       newline_flag = 0,
       current_token = ffi.new(TokenType)
    })
-   state_buffers[state] = buf
+   state_buffers[state] = source
    return state
 end
 
@@ -726,52 +727,52 @@ local function next_token(state: LexerState): TokenC
          else
             kind = kw
          end
+
       
       -- Number
       elseif band(cp[c], PROP_DIGIT) ~= 0 then
-         repeat
-            pos = pos + 1
-            col = col + 1
-            if pos >= len then break end
-            c = ptr[pos]
-         until band(cp[c], PROP_IDENT) == 0 and c ~= 46 and c ~= 43 and c ~= 45
-         
-         pos = start_pos
-         col = start_col
-         c = ptr[pos]
-         
-         if c == 48 and pos + 1 < len and (ptr[pos+1] == 120 or ptr[pos+1] == 88) then -- 0x
+         -- hex prefix 0x / 0X
+         -- local test = char!'0'
+         if c == 48 and pos + 1 < len and (ptr[pos+1] == 120 or ptr[pos+1] == 88) then -- '0x' / '0X'
             pos = pos + 2
             col = col + 2
             while pos < len do
                c = ptr[pos]
-               if band(cp[c], PROP_HEX) ~= 0 or band(cp[c], PROP_DIGIT) ~= 0 then
+               -- digits 0‑9 already have PROP_HEX set in init_char_props()
+               if band(cp[c], PROP_HEX) ~= 0 then
                   pos = pos + 1; col = col + 1
                else
                   break
                end
             end
          else
+            -- integer part
             while pos < len do
                c = ptr[pos]
-               if band(cp[c], PROP_DIGIT) ~= 0 then
+               local props = cp[c]
+               if band(props, PROP_DIGIT) ~= 0 then
                   pos = pos + 1; col = col + 1
                else
                   break
                end
             end
          end
-         if pos < len and ptr[pos] == 46 then
+      
+         -- fractional part
+         if pos < len and ptr[pos] == 46 then -- '.'
             pos = pos + 1; col = col + 1
             while pos < len do
                c = ptr[pos]
-               if band(cp[c], PROP_DIGIT) ~= 0 then
+               local props = cp[c]
+               if band(props, PROP_DIGIT) ~= 0 then
                   pos = pos + 1; col = col + 1
                else
                   break
                end
             end
          end
+      
+         -- exponent part
          if pos < len then
             c = ptr[pos]
             if c == 101 or c == 69 or c == 112 or c == 80 then -- e E p P
@@ -781,7 +782,8 @@ local function next_token(state: LexerState): TokenC
                end
                while pos < len do
                   c = ptr[pos]
-                  if band(cp[c], PROP_DIGIT) ~= 0 then
+                  local props = cp[c]
+                  if band(props, PROP_DIGIT) ~= 0 then
                      pos = pos + 1; col = col + 1
                   else
                      break
@@ -789,17 +791,17 @@ local function next_token(state: LexerState): TokenC
                end
             end
          end
+      
+         -- suffixes uUlLfF
          while pos < len do
             c = ptr[pos]
-            if c == 117 or c == 85 or c == 108 or c == 76 or c == 102 or c == 70 then -- u U l L f F
+            if c == 117 or c == 85 or c == 108 or c == 76 or c == 102 or c == 70 then
                pos = pos + 1; col = col + 1
             else
                break
             end
          end
-         
          kind = K_NUMBER
-
       -- Comments / Punctuation
       elseif c == 47 then -- /
          local next_c = (pos + 1 < len) and ptr[pos+1] or 0
@@ -858,7 +860,7 @@ local function next_token(state: LexerState): TokenC
       tok.line = line
       tok.col = col
       tok.flags = 0
-      return ffi.new("tl_token_fast", tok)
+      return tok
    end
 
    tok.kind = kind
@@ -868,58 +870,12 @@ local function next_token(state: LexerState): TokenC
    tok.col = start_col
    tok.flags = newline_flag
 
-   -- local out: TokenC = ffi.new("tl_token_fast")
-   -- ffi.copy(out, tok, ffi.sizeof("tl_token_fast"))
-   -- return out
-   return ffi.new("tl_token_fast", tok)
+   -- return ffi.new("tl_token_fast", tok)
+   return tok
 end
 
-ffi.cdef [[
-struct tl_string_view {
-   const uint8_t *ptr;
-   uint32_t len;
-};
-]]
-
-local record StringView is ffi.CData where ffi.istype("struct tl_string_view", self)
-   ptr: Uint8Ptr
-   len: integer
-
-   metamethod __tostring: function(self): string
-   metamethod __eq: function(self, other: ffi.CData): boolean
-   metamethod __eq: function(self, other: string): boolean
-   metamethod __len: function(self): integer = macroexp(self: self): integer return self.len end
-   metamethod __concat: function(self, other: string): string
-end
-
-ffi.metatype("struct tl_string_view", {
-   __tostring = function(self: StringView): string
-      return ffi.string(self.ptr, self.len)
-   end,
-   __eq = function(self: StringView, other: ffi.CString | string | StringView): boolean
-      local other_len: integer
-      if other is string then
-         other_len = #other
-      elseif other is StringView then
-         other_len = other.len
-      else
-         other_len = (C.strlen as function(ffi.CData): integer)(other)
-      end
-
-      if self.len ~= other_len then
-         return false
-      end
-      return (C.memcmp as function(ffi.CData, ffi.CData | string, integer))(self.ptr, other, self.len) == 0
-   end,
-
-   __concat = function(self: string | StringView, other: string | StringView): string
-      return tostring(self)..tostring(other)
-   end,
-})
-
-function TokenC:lexeme(src: ffi.CString): StringView
-   return ffi.new("struct tl_string_view", src + self.start, self.stop - self.start)
-   -- return ffi.string(src + self.start, self.stop - self.start)
+function TokenC:lexeme(src: ffi.CString): TLStringView
+   return TLStringView.new(src + self.start, self.stop - self.start)
 end
 
 function TokenC:span(): Span
@@ -932,6 +888,68 @@ ffi.metatype("tl_token_fast", {
       return string.format("Token(kind=%d, span=%d:%d:%d:+%d)", self.kind, self.file_id, self.line, self.col, self.stop - self.start)
    end,
 })
+
+if arg and arg[1] == "--benchmark" then
+   collectgarbage("stop")
+   collectgarbage("stop")
+
+   local function read_file(path: string): string | nil
+      local f = io.open(path, "rb")
+      if not f then return nil end
+      local content = f:read("*a")
+      f:close()
+      return content
+   end
+
+   local niter = os.getenv("NITER")
+   local iterations = niter and tonumber(niter) or 20
+
+   local source = read_file("bench.c") or "int main() { return 0; }"
+   source = string.rep(source, 20)
+
+   print("Iterations: " .. iterations)
+   print("Source size: " .. #source .. " bytes (" .. (#source / 1024) .. " KB)")
+   print("Total data processed: " .. (#source * iterations / 1024 / 1024) .. " MB")
+
+   local profile = require("jit.p")
+   local jit = require("jit")
+
+   local should_profile = os.getenv("PROFILE")
+
+   local function bench_lex(): number
+       local start = os.clock()
+       if should_profile then profile.start(should_profile) end
+       for _ = 1, iterations do
+           local state = new_lexer(source, 1)
+
+           -- local tks = { Lexer.next_token(state) }
+           -- while tks[#tks].kind ~= Lexer.K_EOF do
+           --     tks[#tks+1] = Lexer.next_token(state)
+           -- end
+         
+           local curtk = next_token(state)
+           while curtk.kind ~= K_EOF do
+               curtk = next_token(state)
+           end
+       end
+       local t =  os.clock() - start
+       if should_profile then profile.stop() end
+       -- print(profile.report())
+      return t
+   end
+
+   print("Benchmarking Lexer (FFI)...")
+   print("JIT status at start:", jit.status())
+   -- jit.opt.start("hotloop=1", "hotexit=1") -- force aggressive JIT for testing
+
+   local t = bench_lex()
+   print(string.format("Time: %.4f s", t))
+   print(string.format("Throughput: %.2f MB/s", (iterations * #source / 1024 / 1024) / t))
+   -- print("Benchmarking Lexer.lex_all (FFI)...")
+   -- local t_all = bench_lex_all()
+   -- print(string.format("Time: %.4f s", t_all))
+   -- print(string.format("Throughput: %.2f MB/s", (iterations * #source / 1024 / 1024) / t_all))
+end
 
 return {
    new_lexer = new_lexer,
@@ -1055,5 +1073,6 @@ return {
    TOKEN_FLAG_NEWLINE = TOKEN_FLAG_NEWLINE,
    TOKEN_FLAG_LEADING_SPACE = TOKEN_FLAG_LEADING_SPACE,
    Token = TokenC,
-   StringView = StringView,
+   StringView = TLStringView,
+   TLStringView = TLStringView,
 }

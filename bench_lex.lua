@@ -1,4 +1,5 @@
-
+collectgarbage("stop")
+collectgarbage("stop")
 local Lexer = require("lexer.lexer")
 
 local function read_file(path)
@@ -61,6 +62,9 @@ local function bench_lex()
 end
 
 print("Benchmarking Lexer (FFI)...")
+print("JIT status at start:", jit.status())
+-- jit.opt.start("hotloop=1", "hotexit=1") -- force aggressive JIT for testing
+
 local t = bench_lex()
 print(string.format("Time: %.4f s", t))
 print(string.format("Throughput: %.2f MB/s", (iterations * #source / 1024 / 1024) / t))

@@ -1,5 +1,6 @@
 local ffi = require("ffi")
 local lexer = require("lexer.lexer")
+local TLStringView = require("util.string_view")
 local C = ffi.C
 local Reporter = require("diag.reporter")
 local Diagnostic = require("diag.diagnostics")
@@ -45,14 +46,14 @@ local record PPOptions
 end
 
 local type BytePtr = ffi.CString
-local type StringView = lexer.StringView
+local type StringView = TLStringView
 
 local PUNCT = lexer.PUNCT
 local is_punct_kind = lexer.is_punct_kind
 local is_keyword_kind = lexer.is_keyword_kind
 
 local EMPTY_STR_PTR<const>: BytePtr = ffi.cast("const char*", "")
-local EMPTY_VIEW<const>: StringView = ffi.new("struct tl_string_view", EMPTY_STR_PTR, 0)
+local EMPTY_VIEW<const>: StringView = TLStringView.new(EMPTY_STR_PTR, 0)
 
 local function get_lexeme(mgr: SourceManager, tok: lexer.Token): StringView
    local ptr: BytePtr | nil = mgr.ptrs[tok.file_id]

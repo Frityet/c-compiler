@@ -7,6 +7,7 @@ local ast = require("parser.ast")
 local ffi = require("ffi")
 ffi.cdef [[ int memcmp(const void *s1, const void *s2, size_t n); ]]
 local C = ffi.C
+local TLStringView = require("util.string_view")
 
 local type Token = Lexer.Token
 local type TokenKindType = Lexer.TokenKind
@@ -28,11 +29,6 @@ local kind_lexeme = Lexer.kind_lexeme
 
 local type TokenIterator = function(): Token
 local type BytePtr = ffi.Pointer<ffi.CInteger>
-local record StringView is ffi.CData where ffi.istype("struct tl_string_view", self)
-   ptr: BytePtr
-   len: integer
-   metamethod __eq: function(self, other: ffi.CString | string | StringView): boolean
-end
 local BN = {
    void: types.BuiltinName = "void",
    bool: types.BuiltinName = "bool",

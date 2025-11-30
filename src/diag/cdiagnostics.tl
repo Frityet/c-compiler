@@ -10,7 +10,7 @@ struct tl_diagnostic {
     } severity;
      
     const char *message;
-    struct tl_span span;
+    struct TLSpan span;
     const char *code;
 
     size_t notes_count;

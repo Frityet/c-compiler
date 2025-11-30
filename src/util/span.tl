@@ -1,15 +1,15 @@
 local ffi = require("ffi")
 
 ffi.cdef [[
-struct tl_span {
+struct TLSpan {
     int file_id;
     int start_offset, end_offset;
     int line, column;
 };
 ]]
-local TLSpanType = ffi.typeof("struct tl_span") as function(...: any): Span
+local TLSpanType = ffi.typeof("struct TLSpan") as function(...: any): Span
 
-local record Span is ffi.CData where ffi.istype("struct tl_span", self)
+local record Span is ffi.CData where ffi.istype("struct TLSpan", self)
     file_id: integer           -- interned filename id
     start_offset: integer       -- byte offset start (inclusive)
     end_offset: integer         -- byte offset end (exclusive)
@@ -37,7 +37,7 @@ function Span:merge(other: Span): Span
     )
 end
 
-ffi.metatype("struct tl_span", {
+ffi.metatype("struct TLSpan", {
     __index = Span,
     __tostring = function(self: Span): string
         local width = self.end_offset - self.start_offset
