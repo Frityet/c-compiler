@@ -185,8 +185,19 @@ local state_buffers = setmetatable({}, { __mode = "k" })
 local macro char!(x: Expression): Expression
    expect(x, "string")
 
-   local raw = x.conststr
-   local code = string.byte(raw, 1)
+   local function unquote(s: string): string
+      if #s >= 2 then
+         local first = string.sub(s, 1, 1)
+         local last = string.sub(s, -1, -1)
+         if (first == '"' and last == '"') or (first == "'" and last == "'") then
+            return string.sub(s, 2, -2)
+         end
+      end
+      return s
+   end
+
+   local code = string.byte(unquote(x.tk), 1)
+   local raw = unquote(x.tk)
 
    if code == string.byte("\\") and #raw >= 2 then
       local esc_byte = string.byte(raw, 2)
@@ -220,8 +231,7 @@ local macro char!(x: Expression): Expression
    end
 
    local n = block("integer")
-   n.constnum = code
-   n.tk = tostring(n.constnum)
+   n.tk = tostring(code)
    return n
 end
 
@@ -392,11 +402,20 @@ local macro is_kw!(s: Expression, kw: Expression): Expression
    expect(s, "variable")
    expect(kw, "string")
 
-   local kwlen = #kw.conststr
-   local n = block("integer")
-   n.constnum = kwlen
-   n.tk = tostring(kwlen)
+   local function unquote(s: string): string
+      if #s >= 2 then
+         local first = string.sub(s, 1, 1)
+         local last = string.sub(s, -1, -1)
+         if (first == '"' and last == '"') or (first == "'" and last == "'") then
+            return string.sub(s, 2, -2)
+         end
+      end
+      return s
+   end
 
+   local kwlen = #unquote(kw.tk)
+   local n = block("integer")
+   n.tk = tostring(kwlen)
    return `(C.memcmp as function(ffi.CData, ffi.String, integer))($s, $kw, $n) == 0`
 end
 
@@ -408,21 +427,27 @@ local macro expand_cmp!(x: Expression): Expression
    expect(x[1], "variable")
    expect(x[2], "string")
 
+   local function unquote(s: string): string
+      if #s >= 2 then
+         local first = string.sub(s, 1, 1)
+         local last = string.sub(s, -1, -1)
+         if (first == '"' and last == '"') or (first == "'" and last == "'") then
+            return string.sub(s, 2, -2)
+         end
+      end
+      return s
+   end
+
    local var, str = x[1], x[2]
-   local char = string.byte(str.conststr, 1)
+   local char = string.byte(unquote(str.tk), 1)
    local char_node = block("integer")
-   char_node.constnum = char
    char_node.tk = tostring(char)
    local i_blk = block("integer")
-   i_blk.constnum = 0
    i_blk.tk = "0"
    local expr = `($var)[$i_blk] == $char_node`
-   for i = 2, #x[2].conststr do
-      i_blk.constnum = i-1
+   for i = 2, #unquote(str.tk) do
       i_blk.tk = tostring(i-1)
-
-      char_node.constnum = string.byte(str.conststr, i)
-      char_node.tk = tostring(char_node.constnum)
+      char_node.tk = tostring(string.byte(unquote(str.tk), i))
 
       expr = `$expr and ($var)[$i_blk] == $char_node`
    end

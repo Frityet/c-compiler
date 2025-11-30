@@ -1,10 +1,10 @@
 local ffi = require("ffi")
 local Span = require("util.span")
 local TLStringView = require("util.string_view")
-local LexerFast = require("lexer.lexer")
+local Lexer = require("lexer.lexer")
 local types = require("sema.types-ffi")
 
-local type TLToken = LexerFast.Token
+local type TLToken = Lexer.Token
 local type TypeNode = types.TypeNode
 
 ffi.cdef [[
