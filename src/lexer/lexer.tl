@@ -182,6 +182,49 @@ end
 -- Keep source buffers alive for each lexer state; weak keys so buffers can be GC'd with the state
 local state_buffers = setmetatable({}, { __mode = "k" })
 
+local macro char!(x: Expression): Expression
+   expect(x, "string")
+
+   local raw = x.conststr
+   local code = string.byte(raw, 1)
+
+   if code == string.byte("\\") and #raw >= 2 then
+      local esc_byte = string.byte(raw, 2)
+      if esc_byte == string.byte("n") then
+         code = 10
+      elseif esc_byte == string.byte("r") then
+         code = 13
+      elseif esc_byte == string.byte("t") then
+         code = 9
+      elseif esc_byte == string.byte("\\") then
+         code = 92
+      elseif esc_byte == string.byte("'") then
+         code = 39
+      elseif esc_byte == string.byte('"') then
+         code = 34
+      elseif esc_byte >= string.byte("0") and esc_byte <= string.byte("9") then
+         local oct = tonumber(string.sub(raw, 2), 8)
+         if oct ~= nil then
+            local n = math.tointeger(oct)
+            if n ~= nil then code = n end
+         end
+      elseif esc_byte == string.byte("x") and #raw >= 3 then
+         local hex = tonumber(string.sub(raw, 3), 16)
+         if hex ~= nil then
+            local n = math.tointeger(hex)
+            if n ~= nil then code = n end
+         end
+      else
+         code = esc_byte
+      end
+   end
+
+   local n = block("integer")
+   n.constnum = code
+   n.tk = tostring(n.constnum)
+   return n
+end
+
 -- Character Properties Lookup Table (FFI)
 local PROP_SPACE<const> = 1
 local PROP_DIGIT<const> = 2
@@ -193,11 +236,11 @@ local char_props_c: Uint8Array = ffi.new("uint8_t[256]")
 local function init_char_props()
    for i = 0, 255 do
       local p = 0
-      if (i >= 9 and i <= 13) or i == 32 then p = bor(p, PROP_SPACE) end
-      if i >= 48 and i <= 57 then p = bor(p, bor(PROP_DIGIT, bor(PROP_IDENT, PROP_HEX))) end
-      if (i >= 65 and i <= 90) or (i >= 97 and i <= 122) then p = bor(p, bor(PROP_ALPHA, PROP_IDENT)) end
-      if (i >= 65 and i <= 70) or (i >= 97 and i <= 102) then p = bor(p, PROP_HEX) end
-      if i == 95 then p = bor(p, bor(PROP_IDENT, PROP_ALPHA)) end -- _ is alpha-like for start
+      if (i >= char!'\t' and i <= char!'\r') or i == char!' ' then p = bor(p, PROP_SPACE) end
+      if i >= char!'0' and i <= char!'9' then p = bor(p, bor(PROP_DIGIT, bor(PROP_IDENT, PROP_HEX))) end
+      if (i >= char!'A' and i <= char!'Z') or (i >= char!'a' and i <= char!'z') then p = bor(p, bor(PROP_ALPHA, PROP_IDENT)) end
+      if (i >= char!'A' and i <= char!'F') or (i >= char!'a' and i <= char!'f') then p = bor(p, PROP_HEX) end
+      if i == char!'_' then p = bor(p, bor(PROP_IDENT, PROP_ALPHA)) end -- _ is alpha-like for start
       char_props_c[i] = p
    end
 end
@@ -357,14 +400,7 @@ local macro is_kw!(s: Expression, kw: Expression): Expression
    return `(C.memcmp as function(ffi.CData, ffi.String, integer))($s, $kw, $n) == 0`
 end
 
-local macro char!(x: Expression): Expression
-   expect(x, "string")
 
-   local n = block("integer")
-   n.constnum = string.byte(x.conststr, 1)
-   n.tk = tostring(n.constnum)
-   return n
-end
 
 --x should be `<var> == <LIT>`
 local macro expand_cmp!(x: Expression): Expression
@@ -813,6 +849,8 @@ local function next_token(state: LexerState): TokenC
                pos = pos + 1
             end
             newline_flag = 0 
+            start_pos = pos
+            start_col = col
             goto scan
          elseif next_c == char!'*' then -- /*
             pos = pos + 2; col = col + 2
@@ -830,6 +868,8 @@ local function next_token(state: LexerState): TokenC
                pos = pos + 1
             end
             newline_flag = 0 
+            start_pos = pos
+            start_col = col
             goto scan
          else
             local pk, consumed = read_punct(ptr, pos, len)
@@ -860,7 +900,7 @@ local function next_token(state: LexerState): TokenC
       tok.line = line
       tok.col = col
       tok.flags = 0
-      return tok
+      return ffi.new(TokenType, tok)
    end
 
    tok.kind = kind
@@ -870,8 +910,7 @@ local function next_token(state: LexerState): TokenC
    tok.col = start_col
    tok.flags = newline_flag
 
-   -- return ffi.new("tl_token_fast", tok)
-   return tok
+   return ffi.new(TokenType, tok)
 end
 
 function TokenC:lexeme(src: ffi.CString): TLStringView
