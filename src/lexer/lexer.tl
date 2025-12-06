@@ -2,19 +2,8 @@ local ffi = require("ffi")
 local bit = require("bit")
 local Span = require("util.span")
 local TLStringView = require("util.string_view")
-local LibLoader = require("util.lib_loader")
 local band = bit.band
 local bor = bit.bor
-local LUA_VERSION<const> = "5.1"
-
-local source_info = debug.getinfo(1, "S")
-local source_path: string
-if source_info and source_info.source then
-   source_path = source_info.source
-else
-   source_path = ""
-end
-local PROJECT_ROOT = LibLoader.project_root_from_source(source_path, LUA_VERSION)
 
 local type TokenKind = integer
 local type TokenFlags = integer
@@ -649,39 +638,6 @@ local function read_punct(ptr: Uint8Ptr, pos: integer, len: integer): (TokenKind
    return K_UNKNOWN, 1
 end
 
-ffi.cdef [[
-   struct simdlex_scan_result {
-      uint32_t advance;
-      uint32_t newlines;
-      uint32_t tail_col;
-   };
-   uint32_t skip_space(const uint8_t *str, size_t n);
-   uint32_t read_until(const uint8_t *str, size_t n, uint8_t c);
-   struct simdlex_scan_result skip_line_comment(const uint8_t *str, size_t n);
-   struct simdlex_scan_result skip_block_comment(const uint8_t *str, size_t n);
-   struct simdlex_scan_result scan_string_literal(const uint8_t *str, size_t n, uint8_t quote);
-]]
-local record ScanResult is ffi.CData
-   where ffi.istype("struct simdlex_scan_result", self)
-   advance: integer
-   newlines: integer
-   tail_col: integer
-end
-local record LibSIMDLex
-   skip_space: function(str: ffi.CString, n: integer): integer
-   read_until: function(str: ffi.CString, n: integer, c: integer): integer
-   skip_line_comment: function(str: ffi.CString, n: integer): ScanResult
-   skip_block_comment: function(str: ffi.CString, n: integer): ScanResult
-   scan_string_literal: function(str: ffi.CString, n: integer, quote: integer): ScanResult
-end
-local simdlex_result = LibLoader.load_shared({
-   name = "simdlex",
-   roots = { PROJECT_ROOT },
-   lua_version = LUA_VERSION,
-   env_var = "LIBSIMDLEX",
-})
-local libsimdlex: LibSIMDLex = simdlex_result.lib as LibSIMDLex
-
 local function new_lexer(source: string, file_id: integer): LexerState
    local len = #source
    local buf: ffi.CData = ffi.cast("const char *", source)
@@ -720,55 +676,26 @@ local function next_token(state: LexerState): TokenC
       local c = ptr[pos]
       
       -- Fast Skip Whitespace
-      -- if band(cp[c], PROP_SPACE) ~= 0 then
-      --    newline_flag = 0
-      --    repeat
-      --       if c == char!'\n' then -- \n
-      --          line = line + 1
-      --          col = 1
-      --          newline_flag = TOKEN_FLAG_NEWLINE
-      --       else
-      --          col = col + 1
-      --       end
-      --       pos = pos + 1
-      --       if pos >= len then break end
-      --       c = ptr[pos]
-      --    until band(cp[c], PROP_SPACE) == 0
-
-      --    start_pos = pos
-      --    start_col = col
-
-      --    goto scan
-      -- end
-
-      -- Fast(er) Skip Whitespace
       if band(cp[c], PROP_SPACE) ~= 0 then
-         local advanced = libsimdlex.skip_space(ptr + pos, len - pos)
-         if advanced <= 0 then
-            pos = pos + 1
-            col = col + 1
-            start_pos = pos
-            start_col = col
-            goto scan
-         end
-
-         for i = 0, advanced - 1 do
-            local skipped = ptr[pos + i]
-            if skipped == char!'\n' then
+         newline_flag = 0
+         repeat
+            if c == char!'\n' then -- \n
                line = line + 1
                col = 1
                newline_flag = TOKEN_FLAG_NEWLINE
             else
                col = col + 1
             end
-         end
+            pos = pos + 1
+            if pos >= len then break end
+            c = ptr[pos]
+         until band(cp[c], PROP_SPACE) == 0
 
-         pos = pos + advanced
          start_pos = pos
          start_col = col
+
          goto scan
       end
-      -- local sv = 
 
       -- String / Char (handles wide prefixes)
       if c == char!'"' or c == char!'\'' or (c == char!'L' and pos + 1 < len and (ptr[pos+1] == char!'"' or ptr[pos+1] == char!'\'')) then
@@ -781,18 +708,18 @@ local function next_token(state: LexerState): TokenC
          if quote == char!'\'' then kind = K_CHAR end
          
          pos = pos + 1; col = col + 1 -- skip quote
-         local res = libsimdlex.scan_string_literal(ptr + pos, len - pos, quote)
-         local advanced = res.advance
-         if advanced <= 0 then
-            pos = pos + 1
-            col = col + 1
-         else
-            pos = pos + advanced
-            if res.newlines > 0 then
-               line = line + res.newlines
-               col = res.tail_col
+         
+         while pos < len do
+            c = ptr[pos]
+            if c == quote then
+               pos = pos + 1; col = col + 1
+               break
+            elseif c == 92 then -- \
+               pos = pos + 2; col = col + 2 -- skip escaped char
+            elseif c == 10 then -- newline in string?
+               line = line + 1; col = 1; pos = pos + 1
             else
-               col = col + advanced
+               pos = pos + 1; col = col + 1
             end
          end
 
@@ -891,24 +818,29 @@ local function next_token(state: LexerState): TokenC
          local next_c = (pos + 1 < len) and ptr[pos+1] or 0
          if next_c == char!'/' then -- //
             pos = pos + 2; col = col + 2
-            local res = libsimdlex.skip_line_comment(ptr + pos, len - pos)
-            local advanced = res.advance
-            pos = pos + advanced
-            col = col + advanced
+            while pos < len do
+               c = ptr[pos]
+               if c == 10 then break end
+               pos = pos + 1
+            end
             newline_flag = 0 
             start_pos = pos
             start_col = col
             goto scan
          elseif next_c == char!'*' then -- /*
             pos = pos + 2; col = col + 2
-            local res = libsimdlex.skip_block_comment(ptr + pos, len - pos)
-            local advanced = res.advance
-            pos = pos + advanced
-            if res.newlines > 0 then
-               line = line + res.newlines
-               col = res.tail_col
-            else
-               col = col + advanced
+            while pos < len do
+               c = ptr[pos]
+               if c == char!'*' and pos + 1 < len and ptr[pos+1] == char!'/' then
+                  pos = pos + 2; col = col + 2
+                  break
+               end
+               if c == 10 then
+                  line = line + 1; col = 1
+               else
+                  col = col + 1
+               end
+               pos = pos + 1
             end
             newline_flag = 0 
             start_pos = pos
