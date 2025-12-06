@@ -5,3 +5,6 @@
 	path = extern/tl
 	url = https://github.com/frityet/tl
 	branch = final
+[submodule "extern/LuaJIT"]
+	path = extern/LuaJIT
+	url = https://github.com/LuaJIT/LuaJIT

@@ -10,7 +10,8 @@ description = {
 }
 dependencies = {
    "lua ~> 5.1",
-   "argparse"
+   "argparse",
+   "luafilesystem"
 }
 build_dependencies = {
    "luarocks-build-xmake"
@@ -22,7 +23,7 @@ build = {
       lua = {
          ["tl"] = "extern/tl/tl.lua",
          ["reflect"] = "reflect.lua"
-      }
+      },
    }
 }
 test_dependencies = {

@@ -92,13 +92,20 @@ local record Parser
    typedef_scopes: {{string:boolean}}
 end
 
+local macro pipe!(x: Expression): Expression
+   return require("src.util.macros.pipe").pipe(x, expect, block, clone)
+end
+
+local macro pipe_back!(x: Expression): Expression
+   return require("src.util.macros.pipe").pipe_back(x, expect, block, clone)
+end
+
 local function tok_ptr(p: Parser, tok: Token): BytePtr
    local base: ffi.CString = p.src_ptr
    local ptrs = p.src_ptrs
-   if ptrs ~= nil then
-      local map = ptrs as {integer: ffi.CString}
-      local alt: ffi.CString | nil = map[tok.file_id]
-      if alt ~= nil then base = alt end
+   if not ptrs is nil then
+      local alt: ffi.CString | nil = ptrs[tok.file_id]
+      if not alt is nil then base = alt end
    end
    local ptr: BytePtr = ffi.cast("const uint8_t*", base)
    return ptr + tok.start
@@ -110,12 +117,8 @@ end
 
 local function lexeme_string(p: Parser, tok: Token): string
    local refs = p.src_refs
-   if refs ~= nil then
-      local map = refs as {integer: string}
-      local src = map[tok.file_id]
-      if src ~= nil then
-         return string.sub(src, tok.start + 1, tok.stop)
-      end
+   if not refs is nil and refs[tok.file_id] then
+      return string.sub(refs[tok.file_id], tok.start + 1, tok.stop)
    end
    -- local ptr = tok_ptr(p, tok)
    -- local len = tok_len(tok)
@@ -631,7 +634,7 @@ local function parse_decl_specifiers(p: Parser): ast.DeclSpecifiers | nil
             local val_int: integer | nil = nil
             local ve = value_expr
             if not ve is nil and ve is ast.NumberLiteralExpr then
-               local parsed = tonumber(lexeme_string(p, ve.token))
+               local parsed = pipe!(p | lexeme_string(ve.token) | tonumber)
                if not (parsed is nil) then
                   val_int = math.floor(parsed)
                end
@@ -789,7 +792,7 @@ local function type_from_spec(p: Parser, spec: ast.TypeSpecifier): types.TypeNod
                   local bit_width_num: integer | nil = nil
                   local bw = decl.bit_width
                   if not bw is nil and bw is ast.NumberLiteralExpr then
-                     local parsed_bw = tonumber(lexeme_string(p, bw.token))
+                     local parsed_bw = pipe!(p | lexeme_string(bw.token) | tonumber)
                      if not (parsed_bw is nil) then
                         bit_width_num = math.floor(parsed_bw)
                      end
@@ -819,7 +822,7 @@ local function type_from_spec(p: Parser, spec: ast.TypeSpecifier): types.TypeNod
             local value_int: integer | nil = nil
             local ev = en.value
             if not ev is nil and ev is ast.NumberLiteralExpr then
-               local parsed_val = tonumber(lexeme_string(p, ev.token))
+               local parsed_val = pipe!(p | lexeme_string(ev.token) | tonumber)
                if not (parsed_val is nil) then
                   value_int = math.floor(parsed_val)
                end

@@ -26,15 +26,6 @@ local reporter = {
    warn = function(self, msg) end
 }
 
-
-local function bench_lex_all()
-   local start = os.clock()
-   for _ = 1, iterations do
-      local tks = Lexer.lex_all(source, 1)
-   end
-   return os.clock() - start
-end
-
 local profile = require("jit.p")
 
 local should_profile = os.getenv("PROFILE")

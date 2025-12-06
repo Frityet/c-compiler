@@ -51,4 +51,6 @@ function result.expect<T, E>(r: result.Result<T, E>, message: string): T
    error(message .. ": " .. tostring(e))
 end
 
+
+
 return result
